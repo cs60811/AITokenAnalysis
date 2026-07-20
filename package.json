@@ -1,0 +1,19 @@
+{
+  "name": "ai-token-analysis",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local dashboard for Claude Code / Codex / Gemini token usage and cost, with per-prompt attribution",
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "verify": "node src/verify.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "ccusage": "^20.0.17",
+    "express": "^4.21.2"
+  }
+}
