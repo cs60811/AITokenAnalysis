@@ -91,9 +91,11 @@ app.get('/api/projects', asJson((req) => ({ projects: projectRanking(range(req))
 
 /**
  * Export: raw `ccusage claude daily --since --until --mode calculate --breakdown --json`
- * as a download named 工號_since_until_姓名.json.
+ * as a download named 工號_since_until_使用位置.json.
  */
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+/** 使用位置 codes: company=公司桌機, nb=自備筆電, home=家中使用. */
+const DEVICES = new Set(['company', 'nb', 'home']);
 app.get('/api/export', async (req, res) => {
   try {
     const { since, until } = range(req);
@@ -102,17 +104,19 @@ app.get('/api/export', async (req, res) => {
     }
     // Filename-safe: drop control chars, path separators, quotes, and the `_`
     // used as the field separator in the export filename.
-    const clean = (s) => String(s ?? '').replace(/[\x00-\x1f"'\\/:*?<>|_]/g, '').trim();
-    const empId = clean(req.query.empId);
-    const name = clean(req.query.name);
-    if (!empId || !name) {
-      return res.status(400).json({ error: '工號與姓名為必填', kind: 'bad_request' });
+    const empId = String(req.query.empId ?? '').replace(/[\x00-\x1f"'\\/:*?<>|_]/g, '').trim();
+    const device = String(req.query.device ?? '');
+    if (!empId) {
+      return res.status(400).json({ error: '工號為必填', kind: 'bad_request' });
+    }
+    if (!DEVICES.has(device)) {
+      return res.status(400).json({ error: '使用位置必須是 company / nb / home', kind: 'bad_request' });
     }
 
     const body = await ccusage.exportClaudeDaily({ since, until });
-    const filename = `${empId}_${since}_${until}_${name}.json`;
+    const filename = `${empId}_${since}_${until}_${device}.json`;
     res.setHeader('Content-Type', 'application/json; charset=utf-8');
-    // ASCII fallback + RFC 5987 for the Chinese name.
+    // ASCII fallback + RFC 5987 in case the 工號 contains non-ASCII.
     res.setHeader(
       'Content-Disposition',
       `attachment; filename="${filename.replace(/[^ -~]/g, '_')}"; filename*=UTF-8''${encodeURIComponent(filename)}`,

@@ -252,7 +252,7 @@ td.snippet {
   display: flex; align-items: center; gap: 10px;
   font-size: 13px; color: var(--text-secondary);
 }
-.export-form input {
+.export-form input, .export-form select {
   flex: 1; background: var(--surface-0); color: var(--text-primary);
   border: 1px solid var(--border); border-radius: 6px; padding: 7px 10px;
   font-family: inherit; font-size: 13px;

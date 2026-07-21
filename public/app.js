@@ -923,39 +923,44 @@ $('#export').addEventListener('click', () => {
     <h3>匯出 ccusage 每日用量</h3>
     <p class="hint">
       範圍 <strong>${since} ~ ${until}</strong>（依目前選擇的時間範圍）·
-      檔名為 <code>工號_${since}_${until}_姓名.json</code>
+      檔名為 <code>工號_${since}_${until}_使用位置.json</code>
     </p>
     <form id="export-form" class="export-form">
       <label>工號 <input id="export-empid" required autocomplete="off"></label>
-      <label>姓名 <input id="export-name" required autocomplete="off"></label>
+      <label>使用位置
+        <select id="export-device" required>
+          <option value="company">公司桌機 (company)</option>
+          <option value="nb">自備筆電 (nb)</option>
+          <option value="home">家中使用 (home)</option>
+        </select>
+      </label>
       <div id="export-error" class="export-error" hidden></div>
       <button class="btn" type="submit">匯出 JSON</button>
     </form>`;
   $('#export-empid').value = localStorage.getItem('export-empid') ?? '';
-  $('#export-name').value = localStorage.getItem('export-name') ?? '';
+  $('#export-device').value = localStorage.getItem('export-device') || 'company';
   $('#modal').hidden = false;
-  ($('#export-empid').value ? $('#export-name') : $('#export-empid')).focus();
+  $('#export-empid').focus();
 
   $('#export-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     // Same cleanup as the server: no path chars, no `_` (the filename separator).
-    const cleanField = (s) => s.replace(/["'\\/:*?<>|_]/g, '').trim();
-    const empId = cleanField($('#export-empid').value);
-    const name = cleanField($('#export-name').value);
-    if (!empId || !name) {
+    const empId = $('#export-empid').value.replace(/["'\\/:*?<>|_]/g, '').trim();
+    const device = $('#export-device').value;
+    if (!empId) {
       const box = $('#export-error');
-      box.textContent = '工號與姓名為必填。';
+      box.textContent = '工號為必填。';
       box.hidden = false;
       return;
     }
     localStorage.setItem('export-empid', empId);
-    localStorage.setItem('export-name', name);
+    localStorage.setItem('export-device', device);
 
     const btn = e.target.querySelector('button');
     btn.disabled = true;
     btn.textContent = '匯出中…';
     try {
-      const p = new URLSearchParams({ since, until, empId, name });
+      const p = new URLSearchParams({ since, until, empId, device });
       const res = await fetch(`/api/export?${p}`);
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
@@ -963,7 +968,7 @@ $('#export').addEventListener('click', () => {
       }
       const a = document.createElement('a');
       a.href = URL.createObjectURL(await res.blob());
-      a.download = `${empId}_${since}_${until}_${name}.json`;
+      a.download = `${empId}_${since}_${until}_${device}.json`;
       a.click();
       URL.revokeObjectURL(a.href);
       $('#modal').hidden = true;
