@@ -14,6 +14,7 @@ import {
 } from './aggregate.js';
 import * as ccusage from './ccusage.js';
 import { getAnalysis, invalidate } from './cache.js';
+import { applyUpdate, checkForUpdate, scheduleRestart } from './update.js';
 import { initPricing, pricingStatus } from './pricing.js';
 import { HOST, PORT, RECONCILE_TOLERANCE_PCT, ROOT } from './config.js';
 
@@ -196,6 +197,21 @@ app.post('/api/refresh', asJson(() => {
   const a = getAnalysis();
   return { ok: true, parseMs: a.parseMs, generatedAt: a.generatedAt };
 }));
+
+/** Update check: is the tracked upstream ahead of us? Cached 30 min server-side. */
+app.get('/api/update-check', asJson((req) => checkForUpdate({ force: req.query.force === '1' })));
+
+/** One-click update: ff-only pull, then self-restart (npm install + npm start). */
+app.post('/api/update', async (req, res) => {
+  try {
+    const r = await applyUpdate();
+    res.json({ ok: true, ...r, restarting: r.changed });
+    if (r.changed) scheduleRestart();
+  } catch (err) {
+    const status = err?.kind === 'dirty' ? 409 : 500;
+    res.status(status).json({ error: err?.message ?? String(err), kind: err?.kind ?? 'internal' });
+  }
+});
 
 app.use(express.static(path.join(ROOT, 'public')));
 

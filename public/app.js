@@ -963,6 +963,73 @@ function drawHealth() {
     未能歸因 ${usd(h.unattributed.cost)}（${h.unattributed.pct.toFixed(2)}%）`;
 }
 
+/* ============================== update check ============================== */
+/** Poll /api/health until the restarted server answers again. */
+async function waitForServer(ms = 120_000) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < ms) {
+    await new Promise((r) => setTimeout(r, 1500));
+    try {
+      if ((await fetch('/api/health')).ok) return;
+    } catch {
+      // still restarting
+    }
+  }
+  throw new Error('伺服器未在預期時間內重啟，請手動重新啟動（start.bat）');
+}
+
+function showUpdateToast(u) {
+  const el = $('#update-toast');
+  el.innerHTML = `
+    <div class="toast-title">有新版本可更新</div>
+    <div class="toast-body">
+      落後 <strong>${u.behind}</strong> 個提交 ·
+      最新：${escapeHtml(u.latest.subject)} <code>${escapeHtml(u.latest.hash)}</code>
+    </div>
+    <div class="toast-actions">
+      <button class="btn" id="update-apply">立即更新</button>
+      <button class="btn ghost" id="update-dismiss">忽略此版</button>
+    </div>`;
+  el.hidden = false;
+
+  $('#update-dismiss').addEventListener('click', () => {
+    localStorage.setItem('update-dismissed', u.latest.hash);
+    el.hidden = true;
+  });
+
+  $('#update-apply').addEventListener('click', async () => {
+    const body = el.querySelector('.toast-body');
+    const btns = el.querySelectorAll('button');
+    btns.forEach((b) => { b.disabled = true; });
+    body.innerHTML = '更新中…';
+    try {
+      const r = await api('/api/update', { method: 'POST' });
+      if (!r.restarting) {
+        el.hidden = true;
+        return;
+      }
+      body.innerHTML = `已更新至 <code>${escapeHtml(r.after)}</code>，伺服器重新啟動中…`;
+      await waitForServer();
+      location.reload();
+    } catch (err) {
+      body.innerHTML = `更新失敗：${escapeHtml(err.message)}`;
+      btns.forEach((b) => { b.disabled = false; });
+    }
+  });
+}
+
+/** Fire-and-forget on boot: an update-check failure must never break the dashboard. */
+async function checkUpdate() {
+  try {
+    const u = await api('/api/update-check');
+    if (!u.supported || !u.behind) return;
+    if (localStorage.getItem('update-dismissed') === u.latest.hash) return;
+    showUpdateToast(u);
+  } catch {
+    // silent: the dashboard works fine without update info
+  }
+}
+
 /* ============================== boot ============================== */
 async function loadAll() {
   const [overview, cachewrite, improvements, trend, prompts, sessions, projects, health] = await Promise.all([
@@ -1159,3 +1226,4 @@ loadAll().catch((err) => {
   $('#banner').textContent = `載入失敗：${err.message}`;
   $('#banner').hidden = false;
 });
+checkUpdate();
