@@ -1,6 +1,7 @@
 import express from 'express';
 import path from 'node:path';
 import {
+  behaviorTrend,
   cacheWriteAnalysis,
   improvementSuggestions,
   ourClaudeTotal,
@@ -142,6 +143,9 @@ app.get(
 
 /** Actionable improvement signals derived from the cache-write analysis. */
 app.get('/api/improvements', asJson((req) => improvementSuggestions(range(req))));
+
+/** Behaviour trend: current vs previous window + weekly buckets ("am I improving?"). */
+app.get('/api/trend', asJson((req) => behaviorTrend(range(req))));
 
 app.get(
   '/api/health',

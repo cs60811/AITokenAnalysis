@@ -56,6 +56,7 @@
   <button class="tab active" data-tab="overview" role="tab">模型用量與成本</button>
   <button class="tab" data-tab="cachewrite" role="tab">快取寫入分析</button>
   <button class="tab" data-tab="improve" role="tab">改善建議</button>
+  <button class="tab" data-tab="trend" role="tab">行為趨勢</button>
   <button class="tab" data-tab="prompts" role="tab">語句排行</button>
   <button class="tab" data-tab="sessions" role="tab">Session 排行</button>
 </nav>
@@ -78,9 +79,16 @@
     </div>
 
     <div class="card">
-      <div class="card-head">
-        <h2>每日成本趨勢</h2>
-        <p class="hint">依模型堆疊。</p>
+      <div class="card-head cardhead-row">
+        <div>
+          <h2>成本趨勢</h2>
+          <p class="hint">依模型堆疊。月/年檢視在時間範圍夠寬時較有意義。</p>
+        </div>
+        <div class="seg" id="daily-period">
+          <button data-p="day" class="active">日</button>
+          <button data-p="month">月</button>
+          <button data-p="year">年</button>
+        </div>
       </div>
       <div class="chart-wrap tall"><canvas id="chart-daily"></canvas></div>
     </div>
@@ -161,6 +169,14 @@
 
     <div class="card">
       <div class="card-head">
+        <h2>模型費率對照</h2>
+        <p class="hint">每百萬 token 單價（USD）。看得出為何「用對模型」是最大槓桿——1h 寫入尤其懸殊。</p>
+      </div>
+      <div class="scroll-x"><table id="table-imp-rates"></table></div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
         <h2>低重用 session</h2>
         <p class="hint">有明顯 1h 寫入、但快取重用偏低——寫入還沒被讀夠就結束。點擊可展開明細。</p>
       </div>
@@ -173,6 +189,28 @@
         <p class="hint">成本高度集中，優化聚焦於此。點擊可展開明細。</p>
       </div>
       <div class="scroll-x"><table id="table-imp-top"></table></div>
+    </div>
+  </section>
+
+  <!-- ============ TAB: TREND ============ -->
+  <section class="panel" id="tab-trend">
+    <div class="card callout good">
+      <h2>📈 我有沒有進步?</h2>
+      <p>
+        對比<strong>本期</strong>與<strong>前一段等長期間</strong>的用量習慣。照「改善建議」調整後，
+        這裡就能看到 Opus 佔比、1h 寫入佔比是否下降、快取重用是否上升——<strong>成本與 Opus%／1h% 往下、重用往上，就是進步</strong>。
+        期間依上方時間範圍；想比較更長區間就把範圍拉大。
+      </p>
+    </div>
+
+    <div class="kpi-row" id="trend-kpis"></div>
+
+    <div class="card">
+      <div class="card-head">
+        <h2>每週趨勢</h2>
+        <p class="hint">Opus 成本佔比與 1h 寫入佔比（兩者越低越好），淡色柱為當週總成本。</p>
+      </div>
+      <div class="chart-wrap tall"><canvas id="chart-trend"></canvas></div>
     </div>
   </section>
 

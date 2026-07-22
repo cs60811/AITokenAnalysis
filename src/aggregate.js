@@ -265,16 +265,21 @@ export function improvementSuggestions({ since, until } = {}) {
 
     for (const bm of s.byModel ?? []) {
       const cc = cacheWriteCostOf([bm]);
+      const r = ratesFor(bm.model);
       const e = byModelMap.get(bm.model) ?? {
         model: bm.model,
         writeCost: 0,
         cost1h: 0,
         cost5m: 0,
         totalCost: 0,
-        rate1h:
-          ratesFor(bm.model)?.cache_creation_input_token_cost_above_1hr ??
-          ratesFor(bm.model)?.cache_creation_input_token_cost ??
-          null,
+        rate1h: r?.cache_creation_input_token_cost_above_1hr ?? r?.cache_creation_input_token_cost ?? null,
+        rates: {
+          input: r?.input_cost_per_token ?? null,
+          output: r?.output_cost_per_token ?? null,
+          write5m: r?.cache_creation_input_token_cost ?? null,
+          write1h: r?.cache_creation_input_token_cost_above_1hr ?? r?.cache_creation_input_token_cost ?? null,
+          read: r?.cache_read_input_token_cost ?? null,
+        },
       };
       e.writeCost += cc.writeCost;
       e.cost1h += cc.cost1h;
@@ -312,6 +317,104 @@ export function improvementSuggestions({ since, until } = {}) {
       totalCost,
       reuseRatio: totWriteTok ? totReadTok / totWriteTok : 0,
     },
+    generatedAt,
+  };
+}
+
+/**
+ * Behaviour trend — the "am I improving?" feedback loop.
+ *
+ * The improvement tab tells the user what to change; this shows whether the change
+ * is working. We compute a bundle of habit metrics for the selected window, the
+ * equal-length window before it (for a delta), and weekly buckets across the window
+ * (for direction). Everything is turn-level and reuses cacheWriteCostOf.
+ */
+export function behaviorTrend({ since, until } = {}) {
+  const { sessions, generatedAt } = getAnalysis();
+
+  // Monday-anchored week key (YYYY-MM-DD) for a given ISO date string.
+  const weekKey = (ts) => {
+    const d = new Date(ts.slice(0, 10));
+    const dow = (d.getUTCDay() + 6) % 7; // 0 = Monday
+    d.setUTCDate(d.getUTCDate() - dow);
+    return d.toISOString().slice(0, 10);
+  };
+
+  const emptyAcc = () => ({
+    totalCost: 0,
+    opusCost: 0,
+    cost1h: 0,
+    writeCost: 0,
+    readTok: 0,
+    writeTok: 0,
+    promptCount: 0,
+  });
+
+  const addTurn = (acc, t) => {
+    const c = cacheWriteCostOf(t.byModel);
+    acc.totalCost += t.trueCost;
+    acc.cost1h += c.cost1h;
+    acc.writeCost += c.writeCost;
+    acc.readTok += c.readTok;
+    acc.writeTok += c.write5mTok + c.write1hTok;
+    acc.promptCount += 1;
+    for (const bm of t.byModel ?? []) {
+      if (bm.model.startsWith('claude-opus')) acc.opusCost += bm.cost;
+    }
+  };
+
+  const finalize = (acc) => ({
+    totalCost: acc.totalCost,
+    opusShare: acc.totalCost ? acc.opusCost / acc.totalCost : 0,
+    oneHrShare: acc.writeCost ? acc.cost1h / acc.writeCost : 0,
+    reuse: acc.writeTok ? acc.readTok / acc.writeTok : 0,
+    avgCostPerPrompt: acc.promptCount ? acc.totalCost / acc.promptCount : 0,
+    promptCount: acc.promptCount,
+  });
+
+  // Previous equal-length window: [since - len, since - 1day].
+  const dayMs = 86_400_000;
+  let prevSince = null;
+  let prevUntil = null;
+  const hasComparison = Boolean(since && until);
+  if (hasComparison) {
+    const a = Date.parse(`${since}T00:00:00Z`);
+    const b = Date.parse(`${until}T00:00:00Z`);
+    const lenDays = Math.round((b - a) / dayMs) + 1; // inclusive
+    prevUntil = new Date(a - dayMs).toISOString().slice(0, 10);
+    prevSince = new Date(a - lenDays * dayMs).toISOString().slice(0, 10);
+  }
+
+  const cur = emptyAcc();
+  const prev = emptyAcc();
+  const weekMap = new Map();
+
+  for (const s of sessions) {
+    for (const t of s.turns) {
+      if (t.promptId === UNATTRIBUTED || !t.timestamp) continue;
+      if (withinRange(t.timestamp, since, until)) {
+        addTurn(cur, t);
+        const wk = weekKey(t.timestamp);
+        const acc = weekMap.get(wk) ?? emptyAcc();
+        addTurn(acc, t);
+        weekMap.set(wk, acc);
+      } else if (hasComparison && withinRange(t.timestamp, prevSince, prevUntil)) {
+        addTurn(prev, t);
+      }
+    }
+  }
+
+  const weekly = [...weekMap.entries()]
+    .sort((a, z) => a[0].localeCompare(z[0]))
+    .map(([week, acc]) => ({ week, ...finalize(acc) }));
+
+  return {
+    current: finalize(cur),
+    previous: hasComparison ? finalize(prev) : null,
+    hasComparison,
+    window: { since: since ?? null, until: until ?? null },
+    previousWindow: hasComparison ? { since: prevSince, until: prevUntil } : null,
+    weekly,
     generatedAt,
   };
 }

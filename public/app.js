@@ -74,7 +74,7 @@ function baseOpts(extra = {}) {
 }
 
 /* ============================== state ============================== */
-const state = { overview: null, cachewrite: null, improvements: null, prompts: null, sessions: null, projects: null, health: null };
+const state = { overview: null, cachewrite: null, improvements: null, trend: null, prompts: null, sessions: null, projects: null, health: null };
 
 /* ============================== date range ============================== */
 const fmtDate = (d) =>
@@ -189,17 +189,54 @@ function drawOverview() {
       </tr>`).join('')}
     </tbody>`;
 
-  // Daily cost, stacked by model (part-to-whole over time).
-  const days = [...new Set(d.daily.map((x) => x.period))].sort();
-  const modelNames = models.map((m) => m.model);
-  const perDay = new Map(d.daily.map((x) => [x.period, x]));
+  drawDailyTrend(dailyPeriod);
+  drawTokenSplit();
+}
+
+let dailyPeriod = 'day';
+
+/**
+ * Cost trend stacked by model, re-bucketed to day / month / year. `day` and `month`
+ * come straight from ccusage (overview.daily / overview.monthly); `year` is monthly
+ * summed by calendar year on the client. All respect the global date filter.
+ */
+function drawDailyTrend(period) {
+  const d = state.overview;
+  if (!d) return;
+  dailyPeriod = period;
+  document.querySelectorAll('#daily-period button').forEach((b) => b.classList.toggle('active', b.dataset.p === period));
+
+  let rows;
+  if (period === 'month') {
+    rows = d.monthly ?? [];
+  } else if (period === 'year') {
+    const byYear = new Map();
+    for (const m of d.monthly ?? []) {
+      const y = String(m.period).slice(0, 4);
+      const agg = byYear.get(y) ?? { period: y, modelBreakdowns: new Map() };
+      for (const b of m.modelBreakdowns ?? []) {
+        agg.modelBreakdowns.set(b.modelName, (agg.modelBreakdowns.get(b.modelName) ?? 0) + (b.cost ?? 0));
+      }
+      byYear.set(y, agg);
+    }
+    rows = [...byYear.values()].map((a) => ({
+      period: a.period,
+      modelBreakdowns: [...a.modelBreakdowns.entries()].map(([modelName, cost]) => ({ modelName, cost })),
+    }));
+  } else {
+    rows = d.daily ?? [];
+  }
+
+  const periods = [...new Set(rows.map((x) => x.period))].sort();
+  const modelNames = (d.models ?? []).map((m) => m.model);
+  const byPeriod = new Map(rows.map((x) => [x.period, x]));
   render('chart-daily', {
     type: 'bar',
     data: {
-      labels: days,
+      labels: periods,
       datasets: modelNames.map((mn) => ({
         label: mn,
-        data: days.map((day) => perDay.get(day)?.modelBreakdowns?.find((b) => b.modelName === mn)?.cost ?? 0),
+        data: periods.map((p) => byPeriod.get(p)?.modelBreakdowns?.find((b) => b.modelName === mn)?.cost ?? 0),
         backgroundColor: colorForModel(mn),
         borderRadius: 3,
         borderSkipped: false,
@@ -222,8 +259,6 @@ function drawOverview() {
       },
     }),
   });
-
-  drawTokenSplit();
 }
 
 /**
@@ -572,6 +607,21 @@ function drawImprove() {
       </tr>`).join('')}
     </tbody>`;
 
+  // Model pricing table — per-million-token rates, so the model-choice lever is legible.
+  const perM = (r) => (r == null ? '—' : `$${(r * 1e6).toFixed(2)}`);
+  $('#table-imp-rates').innerHTML = `
+    <thead><tr><th>模型</th><th class="num">輸入</th><th class="num">輸出</th><th class="num">5m 寫入</th><th class="num">1h 寫入</th><th class="num">快取讀取</th></tr></thead>
+    <tbody>${models.map((m) => `
+      <tr>
+        <td><span class="swatch" style="background:${colorForModel(m.model)}"></span>${escapeHtml(m.model)}</td>
+        <td class="num">${perM(m.rates?.input)}</td>
+        <td class="num">${perM(m.rates?.output)}</td>
+        <td class="num muted">${perM(m.rates?.write5m)}</td>
+        <td class="num delta-up">${perM(m.rates?.write1h)}</td>
+        <td class="num muted">${perM(m.rates?.read)}</td>
+      </tr>`).join('')}
+    </tbody>`;
+
   const sessionRow = (s) => `
     <tr class="clickable" data-session="${s.sessionId}">
       <td>${escapeHtml(s.projectLabel ?? '—')}</td>
@@ -595,6 +645,91 @@ function drawImprove() {
 
   document.querySelectorAll('#tab-improve tr[data-session]').forEach((tr) => {
     tr.addEventListener('click', () => showSession(tr.dataset.session));
+  });
+}
+
+/* ============================= TAB: TREND ============================= */
+/**
+ * "Am I improving?" — current window vs the previous equal-length window, plus a
+ * weekly trend. Direction matters: cost / Opus% / 1h% / cost-per-prompt going DOWN
+ * is good (green); reuse going UP is good.
+ */
+function drawTrend() {
+  const d = state.trend;
+  if (!d) return;
+  const cur = d.current;
+  const prev = d.previous;
+  const comparable = d.hasComparison && prev && prev.promptCount > 0;
+
+  // metric: value now, formatter, and whether "lower is better".
+  const pct = (n) => `${(n * 100).toFixed(0)}%`;
+  const metrics = [
+    { label: '總成本', now: cur.totalCost, prev: prev?.totalCost, fmt: usd, lowerBetter: true, hero: true },
+    { label: 'Opus 成本佔比', now: cur.opusShare, prev: prev?.opusShare, fmt: pct, lowerBetter: true },
+    { label: '1h 寫入佔比', now: cur.oneHrShare, prev: prev?.oneHrShare, fmt: pct, lowerBetter: true },
+    { label: '快取重用倍數', now: cur.reuse, prev: prev?.reuse, fmt: (n) => `${n.toFixed(1)}×`, lowerBetter: false },
+    { label: '每語句平均成本', now: cur.avgCostPerPrompt, prev: prev?.avgCostPerPrompt, fmt: usd4, lowerBetter: true },
+  ];
+
+  const deltaHtml = (m) => {
+    if (!comparable || m.prev == null) return '<div class="foot muted">無上期資料可比較</div>';
+    const diff = m.now - m.prev;
+    if (Math.abs(diff) < 1e-9 || (!m.prev && !m.now)) return '<div class="foot muted">與上期持平</div>';
+    const relBase = m.prev || (m.now ? m.now : 1);
+    const relPct = (diff / Math.abs(relBase)) * 100;
+    const improved = m.lowerBetter ? diff < 0 : diff > 0;
+    const arrow = diff < 0 ? '▼' : '▲';
+    return `<div class="foot"><span class="${improved ? 'delta-down' : 'delta-up'}">${arrow} ${Math.abs(relPct).toFixed(0)}%</span> vs 上期 ${m.fmt(m.prev)}</div>`;
+  };
+
+  $('#trend-kpis').innerHTML = metrics.map((m) => `
+    <div class="kpi">
+      <div class="label">${m.label}</div>
+      <div class="value${m.hero ? ' hero' : ''}">${m.fmt(m.now)}</div>
+      ${deltaHtml(m)}
+    </div>`).join('');
+
+  // Weekly trend: Opus% and 1h% lines (lower = better) over faint weekly-cost bars.
+  const wk = d.weekly;
+  render('chart-trend', {
+    type: 'bar',
+    data: {
+      labels: wk.map((w) => w.week),
+      datasets: [
+        {
+          type: 'line', label: 'Opus 成本佔比', yAxisID: 'yPct',
+          data: wk.map((w) => w.opusShare * 100),
+          borderColor: css('--series-5'), backgroundColor: css('--series-5'),
+          borderWidth: 2, tension: 0.25, pointRadius: 3,
+        },
+        {
+          type: 'line', label: '1h 寫入佔比', yAxisID: 'yPct',
+          data: wk.map((w) => w.oneHrShare * 100),
+          borderColor: css('--series-write'), backgroundColor: css('--series-write'),
+          borderWidth: 2, tension: 0.25, pointRadius: 3,
+        },
+        {
+          type: 'bar', label: '當週總成本', yAxisID: 'yCost',
+          data: wk.map((w) => w.totalCost),
+          backgroundColor: css('--series-read'), borderRadius: 3, borderSkipped: false,
+          order: 99,
+        },
+      ],
+    },
+    options: baseOpts({
+      scales: {
+        x: { grid: { display: false }, border: { color: css('--axis') }, ticks: { color: css('--text-muted'), font: { size: 10 } } },
+        yPct: { position: 'left', min: 0, max: 100, grid: { color: css('--grid') }, border: { color: css('--axis') }, ticks: { color: css('--text-muted'), font: { size: 11 }, callback: (v) => `${v}%` } },
+        yCost: { position: 'right', grid: { display: false }, border: { color: css('--axis') }, ticks: { color: css('--text-muted'), font: { size: 11 }, callback: (v) => `$${v}` } },
+      },
+      plugins: {
+        tooltip: {
+          callbacks: {
+            label: (c) => (c.dataset.yAxisID === 'yPct' ? ` ${c.dataset.label}: ${c.parsed.y.toFixed(0)}%` : ` ${c.dataset.label}: ${usd(c.parsed.y)}`),
+          },
+        },
+      },
+    }),
   });
 }
 
@@ -830,16 +965,17 @@ function drawHealth() {
 
 /* ============================== boot ============================== */
 async function loadAll() {
-  const [overview, cachewrite, improvements, prompts, sessions, projects, health] = await Promise.all([
+  const [overview, cachewrite, improvements, trend, prompts, sessions, projects, health] = await Promise.all([
     api(withRange('/api/overview')).catch((e) => ({ error: e.message, models: [], daily: [], monthly: [], totalCost: 0, claudeCost: 0, otherCost: 0 })),
     api(withRange('/api/cache-writes', { limit: 30 })),
     api(withRange('/api/improvements')),
+    api(withRange('/api/trend')),
     api(withRange('/api/prompts', { limit: $('#filter-limit').value, project: $('#filter-project').value })),
     api(withRange('/api/sessions')),
     api(withRange('/api/projects')),
     api('/api/health'),
   ]);
-  Object.assign(state, { overview, cachewrite, improvements, prompts, sessions, projects, health });
+  Object.assign(state, { overview, cachewrite, improvements, trend, prompts, sessions, projects, health });
 
   const sel = $('#filter-project');
   if (sel.options.length <= 1) {
@@ -863,7 +999,7 @@ async function reloadPrompts() {
   drawPrompts();
 }
 
-const DRAW = { overview: drawOverview, cachewrite: drawCacheWrite, improve: drawImprove, prompts: drawPrompts, sessions: drawSessions };
+const DRAW = { overview: drawOverview, cachewrite: drawCacheWrite, improve: drawImprove, trend: drawTrend, prompts: drawPrompts, sessions: drawSessions };
 
 /**
  * Show a tab and (re)build its charts.
@@ -886,6 +1022,11 @@ document.querySelectorAll('.tab').forEach((tab) => {
 
 $('#filter-project').addEventListener('change', reloadPrompts);
 $('#filter-limit').addEventListener('change', reloadPrompts);
+
+// Cost-trend period toggle (day / month / year) — re-buckets without refetching.
+document.querySelectorAll('#daily-period button').forEach((b) => {
+  b.addEventListener('click', () => drawDailyTrend(b.dataset.p));
+});
 
 // Date range: a preset fills the dates and reloads; editing a date switches to "自訂".
 $('#date-preset').addEventListener('change', () => {
