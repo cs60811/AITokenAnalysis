@@ -1,12 +1,21 @@
 import { execFile, spawn } from 'node:child_process';
-import { ROOT } from './config.js';
+import fs from 'node:fs';
+import path from 'node:path';
+import { REPO_URL, ROOT } from './config.js';
 
 /**
- * Self-update via git: "new release" = the tracked upstream branch has commits
- * we don't. This works for anyone who got the project with `git clone` and
- * needs no platform API (GitHub/GitLab/...). Zip users get { supported: false }
- * and the UI stays silent.
+ * Self-update, two modes:
+ *
+ * - git (clone installs): "new release" = the tracked upstream branch has
+ *   commits we don't. Supports one-click pull + restart.
+ * - zip (no .git at all): compare our package.json version against the repo's
+ *   on raw.githubusercontent.com. Notify only — the button opens the zip
+ *   download; bumping `version` on release is what makes the toast appear.
  */
+
+const RAW_PKG_URL = `${REPO_URL.replace('https://github.com/', 'https://raw.githubusercontent.com/')}/master/package.json`;
+const ZIP_URL = `${REPO_URL}/archive/refs/heads/master.zip`;
+const ZIP_FETCH_TIMEOUT_MS = 10_000;
 
 const GIT_TIMEOUT_MS = 15_000;
 
@@ -38,35 +47,79 @@ const CHECK_TTL_MS = 30 * 60_000;
 export async function checkForUpdate({ force = false } = {}) {
   if (!force && cache.result && Date.now() - cache.at < CHECK_TTL_MS) return cache.result;
 
-  let result;
-  try {
-    await git(['rev-parse', '--is-inside-work-tree']);
-    let upstream = null;
-    try {
-      upstream = await git(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}']);
-    } catch {
-      result = { supported: false, reason: '目前分支沒有追蹤的遠端分支' };
-    }
-    if (upstream) {
-      await git(['fetch', '--quiet']);
-      const behind = Number(await git(['rev-list', '--count', 'HEAD..@{u}']));
-      const [curHash, curSubject] = (await git(['log', '-1', '--format=%h\t%s', 'HEAD'])).split('\t');
-      const [newHash, newSubject, newDate] = (await git(['log', '-1', '--format=%h\t%s\t%cI', '@{u}'])).split('\t');
-      result = {
-        supported: true,
-        upstream,
-        behind,
-        current: { hash: curHash, subject: curSubject },
-        latest: { hash: newHash, subject: newSubject, date: newDate },
-      };
-    }
-  } catch (err) {
-    result = { supported: false, reason: `git 檢查失敗：${err.message}` };
-  }
-
+  // null = not a git checkout at all -> fall back to the zip version check.
+  // A git checkout without upstream (dev branches) stays silent on purpose.
+  const result = (await gitCheck()) ?? (await zipCheck());
   result.checkedAt = new Date().toISOString();
   cache = { at: Date.now(), result };
   return result;
+}
+
+async function gitCheck() {
+  try {
+    await git(['rev-parse', '--is-inside-work-tree']);
+  } catch {
+    return null; // no .git (zip install) or git not installed
+  }
+  try {
+    let upstream;
+    try {
+      upstream = await git(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}']);
+    } catch {
+      return { supported: false, reason: '目前分支沒有追蹤的遠端分支' };
+    }
+    await git(['fetch', '--quiet']);
+    const behind = Number(await git(['rev-list', '--count', 'HEAD..@{u}']));
+    const [curHash, curSubject] = (await git(['log', '-1', '--format=%h\t%s', 'HEAD'])).split('\t');
+    const [newHash, newSubject, newDate] = (await git(['log', '-1', '--format=%h\t%s\t%cI', '@{u}'])).split('\t');
+    return {
+      supported: true,
+      mode: 'git',
+      upstream,
+      behind,
+      current: { hash: curHash, subject: curSubject },
+      latest: { hash: newHash, subject: newSubject, date: newDate },
+    };
+  } catch (err) {
+    return { supported: false, reason: `git 檢查失敗：${err.message}` };
+  }
+}
+
+/** a > b for dotted version strings ("1.10.0" > "1.9.1"). */
+function newerVersion(a, b) {
+  const pa = String(a).split('.').map(Number);
+  const pb = String(b).split('.').map(Number);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    if ((pa[i] ?? 0) > (pb[i] ?? 0)) return true;
+    if ((pa[i] ?? 0) < (pb[i] ?? 0)) return false;
+  }
+  return false;
+}
+
+async function zipCheck() {
+  try {
+    const local = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version;
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), ZIP_FETCH_TIMEOUT_MS);
+    let remote;
+    try {
+      const res = await fetch(RAW_PKG_URL, { signal: ctrl.signal });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      remote = (await res.json()).version;
+    } finally {
+      clearTimeout(timer);
+    }
+    return {
+      supported: true,
+      mode: 'zip',
+      behind: newerVersion(remote, local) ? 1 : 0,
+      current: { version: local },
+      latest: { version: remote },
+      downloadUrl: ZIP_URL,
+    };
+  } catch (err) {
+    return { supported: false, reason: `版本檢查失敗：${err.message}` };
+  }
 }
 
 export async function applyUpdate() {

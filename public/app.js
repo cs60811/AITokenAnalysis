@@ -980,22 +980,33 @@ async function waitForServer(ms = 120_000) {
 
 function showUpdateToast(u) {
   const el = $('#update-toast');
+  const isZip = u.mode === 'zip';
   el.innerHTML = `
     <div class="toast-title">有新版本可更新</div>
-    <div class="toast-body">
-      落後 <strong>${u.behind}</strong> 個提交 ·
-      最新：${escapeHtml(u.latest.subject)} <code>${escapeHtml(u.latest.hash)}</code>
+    <div class="toast-body">${isZip
+      ? `新版本 <strong>${escapeHtml(u.latest.version)}</strong>（目前 ${escapeHtml(u.current.version)}）·
+         下載 zip 解壓覆蓋原資料夾後，重新執行 start.bat`
+      : `落後 <strong>${u.behind}</strong> 個提交 ·
+         最新：${escapeHtml(u.latest.subject)} <code>${escapeHtml(u.latest.hash)}</code>`}
     </div>
     <div class="toast-actions">
-      <button class="btn" id="update-apply">立即更新</button>
+      <button class="btn" id="update-apply">${isZip ? '前往下載新版' : '立即更新'}</button>
       <button class="btn ghost" id="update-dismiss">忽略此版</button>
     </div>`;
   el.hidden = false;
 
+  const dismissKey = isZip ? u.latest.version : u.latest.hash;
   $('#update-dismiss').addEventListener('click', () => {
-    localStorage.setItem('update-dismissed', u.latest.hash);
+    localStorage.setItem('update-dismissed', dismissKey);
     el.hidden = true;
   });
+
+  if (isZip) {
+    $('#update-apply').addEventListener('click', () => {
+      window.open(u.downloadUrl, '_blank');
+    });
+    return;
+  }
 
   $('#update-apply').addEventListener('click', async () => {
     const body = el.querySelector('.toast-body');
@@ -1023,7 +1034,8 @@ async function checkUpdate() {
   try {
     const u = await api('/api/update-check');
     if (!u.supported || !u.behind) return;
-    if (localStorage.getItem('update-dismissed') === u.latest.hash) return;
+    const dismissKey = u.mode === 'zip' ? u.latest.version : u.latest.hash;
+    if (localStorage.getItem('update-dismissed') === dismissKey) return;
     showUpdateToast(u);
   } catch {
     // silent: the dashboard works fine without update info

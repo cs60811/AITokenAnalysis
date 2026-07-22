@@ -27,6 +27,9 @@ export const CACHE_VERSION = 1;
 export const PORT = Number(process.env.PORT) || 4317;
 export const HOST = '127.0.0.1';
 
+/** Public repo — used by the zip-mode update check (raw package.json + zip download). */
+export const REPO_URL = 'https://github.com/cs60811/AITokenAnalysis';
+
 export const LITELLM_PRICES_URL =
   'https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json';
 export const LITELLM_TIMEOUT_MS = 5000;
