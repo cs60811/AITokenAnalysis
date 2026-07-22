@@ -195,10 +195,35 @@ function drawOverview() {
 
 let dailyPeriod = 'day';
 
+/** Re-bucket ccusage rows: sum modelBreakdowns per keyOf(period). */
+function bucketBy(src, keyOf) {
+  const map = new Map();
+  for (const r of src) {
+    const k = keyOf(String(r.period));
+    const agg = map.get(k) ?? { period: k, modelBreakdowns: new Map() };
+    for (const b of r.modelBreakdowns ?? []) {
+      agg.modelBreakdowns.set(b.modelName, (agg.modelBreakdowns.get(b.modelName) ?? 0) + (b.cost ?? 0));
+    }
+    map.set(k, agg);
+  }
+  return [...map.values()].map((a) => ({
+    period: a.period,
+    modelBreakdowns: [...a.modelBreakdowns.entries()].map(([modelName, cost]) => ({ modelName, cost })),
+  }));
+}
+
+/** Monday of the week containing an ISO date — same anchor as the 趨勢 tab. */
+const weekOf = (iso) => {
+  const dt = new Date(`${iso.slice(0, 10)}T00:00:00Z`);
+  dt.setUTCDate(dt.getUTCDate() - ((dt.getUTCDay() + 6) % 7));
+  return dt.toISOString().slice(0, 10);
+};
+
 /**
- * Cost trend stacked by model, re-bucketed to day / month / year. `day` and `month`
- * come straight from ccusage (overview.daily / overview.monthly); `year` is monthly
- * summed by calendar year on the client. All respect the global date filter.
+ * Cost trend stacked by model, re-bucketed to day / week / month / year. `day` and
+ * `month` come straight from ccusage (overview.daily / overview.monthly); `week`
+ * (Monday-anchored) re-buckets daily and `year` re-buckets monthly on the client.
+ * All respect the global date filter.
  */
 function drawDailyTrend(period) {
   const d = state.overview;
@@ -210,19 +235,9 @@ function drawDailyTrend(period) {
   if (period === 'month') {
     rows = d.monthly ?? [];
   } else if (period === 'year') {
-    const byYear = new Map();
-    for (const m of d.monthly ?? []) {
-      const y = String(m.period).slice(0, 4);
-      const agg = byYear.get(y) ?? { period: y, modelBreakdowns: new Map() };
-      for (const b of m.modelBreakdowns ?? []) {
-        agg.modelBreakdowns.set(b.modelName, (agg.modelBreakdowns.get(b.modelName) ?? 0) + (b.cost ?? 0));
-      }
-      byYear.set(y, agg);
-    }
-    rows = [...byYear.values()].map((a) => ({
-      period: a.period,
-      modelBreakdowns: [...a.modelBreakdowns.entries()].map(([modelName, cost]) => ({ modelName, cost })),
-    }));
+    rows = bucketBy(d.monthly ?? [], (p) => p.slice(0, 4));
+  } else if (period === 'week') {
+    rows = bucketBy(d.daily ?? [], weekOf);
   } else {
     rows = d.daily ?? [];
   }
