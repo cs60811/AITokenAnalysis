@@ -13,6 +13,7 @@ import {
   unattributedTotal,
 } from './aggregate.js';
 import * as ccusage from './ccusage.js';
+import { cachedVersion, filterDaily, fullDaily, invalidateCcusage, monthlyFromDaily } from './ccusage-cache.js';
 import { getAnalysis, invalidate } from './cache.js';
 import { applyUpdate, checkForUpdate, scheduleRestart } from './update.js';
 import { initPricing, pricingStatus } from './pricing.js';
@@ -39,18 +40,15 @@ const range = (req) => ({
   until: req.query.until || undefined,
 });
 
-/** Tab 1: every agent, straight from ccusage. */
+/** Tab 1: every agent, from the cached full-range ccusage run, range-filtered here. */
 app.get(
   '/api/overview',
   asJson(async (req) => {
-    const [daily, monthly] = await Promise.all([
-      ccusage.daily(range(req)),
-      ccusage.monthly(range(req)),
-    ]);
+    const doc = filterDaily(await fullDaily(), range(req));
     return {
-      ...ccusage.modelTotalsFromDaily(daily),
-      daily: daily.daily ?? [],
-      monthly: monthly.monthly ?? [],
+      ...ccusage.modelTotalsFromDaily(doc),
+      daily: doc.daily,
+      monthly: monthlyFromDaily(doc.daily),
     };
   }),
 );
@@ -159,8 +157,8 @@ app.get(
     let ccusageErr = null;
     let version = null;
     try {
-      version = await ccusage.version();
-      const totals = ccusage.modelTotalsFromDaily(await ccusage.daily());
+      version = await cachedVersion();
+      const totals = ccusage.modelTotalsFromDaily(await fullDaily());
       const delta = ours - totals.claudeCost;
       const pct = totals.claudeCost ? (Math.abs(delta) / totals.claudeCost) * 100 : 0;
       reconcile = {
@@ -194,6 +192,8 @@ app.get(
 
 app.post('/api/refresh', asJson(() => {
   invalidate();
+  invalidateCcusage();
+  fullDaily().catch(() => {}); // start the ccusage re-run now so the reload piggybacks on it
   const a = getAnalysis();
   return { ok: true, parseMs: a.parseMs, generatedAt: a.generatedAt };
 }));
@@ -228,3 +228,7 @@ if (!status.rates) {
 app.listen(PORT, HOST, () => {
   console.log(`AI usage dashboard: http://${HOST}:${PORT}`);
 });
+
+// Warm the caches in the background so the first page load skips the ~4s CLI run.
+fullDaily().catch(() => {});
+cachedVersion().catch(() => {});

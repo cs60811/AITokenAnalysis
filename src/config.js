@@ -46,4 +46,11 @@ export const UNATTRIBUTED_TOLERANCE_PCT = 5;
 export const CCUSAGE_TIMEOUT_MS = 60_000;
 export const CCUSAGE_MAX_BUFFER = 1 << 28;
 
+/**
+ * The ccusage cache is fingerprint-invalidated for Claude transcripts, but ccusage
+ * also reads other agents' logs (codex/gemini) the fingerprint can't see. A cached
+ * document older than this is served stale and refreshed in the background.
+ */
+export const CCUSAGE_SWR_MS = 5 * 60_000;
+
 export const SNIPPET_CHARS = 120;

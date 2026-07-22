@@ -58,3 +58,8 @@ export function getAnalysis({ force = false } = {}) {
 export function invalidate() {
   memo = null;
 }
+
+/** Fingerprint of the current transcript corpus — shared with the ccusage cache. */
+export function currentFingerprint() {
+  return fingerprint(discoverSessions());
+}
