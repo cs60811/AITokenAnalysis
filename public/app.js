@@ -961,7 +961,16 @@ function drawHealth() {
   const msgs = [];
   let cls = 'ok';
 
-  if (h.ccusage?.error) {
+  // First-run on a machine with no transcripts: explain instead of a wall of zeros.
+  const noData = h.analysis?.files === 0;
+  if (noData) {
+    cls = 'warn';
+    msgs.push(
+      `這台電腦找不到 Claude Code 的使用紀錄（<code>${escapeHtml(h.analysis.dataDir ?? '~/.claude/projects')}</code> 沒有任何對話檔案）。` +
+      `需要先安裝並使用過 <strong>Claude Code</strong>，儀表板才有資料可以分析。`,
+    );
+  }
+  if (h.ccusage?.error && !noData) {
     cls = 'error';
     msgs.push(`ccusage 無法執行（${h.ccusage.error.kind}）：${escapeHtml(h.ccusage.error.message)}`);
   }

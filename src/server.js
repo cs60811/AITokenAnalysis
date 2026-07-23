@@ -18,7 +18,7 @@ import { cachedVersion, filterDaily, fullDaily, invalidateCcusage, monthlyFromDa
 import { getAnalysis, invalidate } from './cache.js';
 import { applyUpdate, checkForUpdate, scheduleRestart } from './update.js';
 import { initPricing, pricingStatus } from './pricing.js';
-import { HOST, PORT, RECONCILE_TOLERANCE_PCT, ROOT } from './config.js';
+import { CLAUDE_PROJECTS_DIR, HOST, PORT, RECONCILE_TOLERANCE_PCT, ROOT } from './config.js';
 
 const app = express();
 app.disable('x-powered-by');
@@ -184,6 +184,7 @@ app.get(
         parseMs: analysis.parseMs,
         generatedAt: analysis.generatedAt,
         cached: analysis.cached,
+        dataDir: CLAUDE_PROJECTS_DIR,
       },
       unattributed: { cost: un, pct: ours ? (un / ours) * 100 : 0 },
       reconcile,
