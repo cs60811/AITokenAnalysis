@@ -704,8 +704,19 @@ function drawTrend() {
       ${deltaHtml(m)}
     </div>`).join('');
 
-  // Weekly trend: Opus% and 1h% lines (lower = better) over faint weekly-cost bars.
+  // Weekly trend: cost stacked by model (entity-stable colours, same as every other
+  // chart) + a single Opus-share line. The 1h-write share was dropped from the
+  // chart — it sits at 80-100% every week (a property of Claude Code's caching,
+  // not of user behaviour) and only tangled with the Opus line; its number still
+  // lives in the KPI cards above.
   const wk = d.weekly;
+  const wkModels = [...new Map(
+    wk.flatMap((w) => w.byModel ?? []).map((m) => [m.model, 0]),
+  ).keys()];
+  // Assign colour slots by overall spend so big models keep their overview colours.
+  const wkTotals = new Map(wkModels.map((m) => [m, wk.reduce((s, w) => s + (w.byModel?.find((x) => x.model === m)?.cost ?? 0), 0)]));
+  wkModels.sort((a, z) => wkTotals.get(z) - wkTotals.get(a));
+
   render('chart-trend', {
     type: 'bar',
     data: {
@@ -716,31 +727,35 @@ function drawTrend() {
           data: wk.map((w) => w.opusShare * 100),
           borderColor: css('--series-5'), backgroundColor: css('--series-5'),
           borderWidth: 2, tension: 0.25, pointRadius: 3,
+          order: 0,
         },
-        {
-          type: 'line', label: '1h 寫入佔比', yAxisID: 'yPct',
-          data: wk.map((w) => w.oneHrShare * 100),
-          borderColor: css('--series-write'), backgroundColor: css('--series-write'),
-          borderWidth: 2, tension: 0.25, pointRadius: 3,
-        },
-        {
-          type: 'bar', label: '當週總成本', yAxisID: 'yCost',
-          data: wk.map((w) => w.totalCost),
-          backgroundColor: css('--series-read'), borderRadius: 3, borderSkipped: false,
+        ...wkModels.map((mn) => ({
+          type: 'bar', label: mn, yAxisID: 'yCost', stack: 'cost',
+          data: wk.map((w) => w.byModel?.find((x) => x.model === mn)?.cost ?? 0),
+          backgroundColor: colorForModel(mn),
+          borderRadius: 3, borderSkipped: false,
+          borderColor: css('--surface-1'),
+          borderWidth: { top: 2, right: 0, bottom: 0, left: 0 },
           order: 99,
-        },
+        })),
       ],
     },
     options: baseOpts({
       scales: {
-        x: { grid: { display: false }, border: { color: css('--axis') }, ticks: { color: css('--text-muted'), font: { size: 10 } } },
-        yPct: { position: 'left', min: 0, max: 100, grid: { color: css('--grid') }, border: { color: css('--axis') }, ticks: { color: css('--text-muted'), font: { size: 11 }, callback: (v) => `${v}%` } },
-        yCost: { position: 'right', grid: { display: false }, border: { color: css('--axis') }, ticks: { color: css('--text-muted'), font: { size: 11 }, callback: (v) => `$${v}` } },
+        x: { stacked: true, grid: { display: false }, border: { color: css('--axis') }, ticks: { color: css('--text-muted'), font: { size: 10 } } },
+        yCost: { stacked: true, position: 'left', grid: { color: css('--grid') }, border: { color: css('--axis') }, ticks: { color: css('--text-muted'), font: { size: 11 }, callback: (v) => `$${v}` } },
+        yPct: { position: 'right', min: 0, max: 100, grid: { display: false }, border: { color: css('--axis') }, ticks: { color: css('--text-muted'), font: { size: 11 }, callback: (v) => `${v}%` } },
       },
       plugins: {
         tooltip: {
           callbacks: {
-            label: (c) => (c.dataset.yAxisID === 'yPct' ? ` ${c.dataset.label}: ${c.parsed.y.toFixed(0)}%` : ` ${c.dataset.label}: ${usd(c.parsed.y)}`),
+            label: (c) => (c.dataset.yAxisID === 'yPct'
+              ? ` ${c.dataset.label}: ${c.parsed.y.toFixed(0)}%`
+              : (c.parsed.y > 0 ? ` ${c.dataset.label}: ${usd(c.parsed.y)}` : null)),
+            footer: (items) => {
+              const cost = items.filter((i) => i.dataset.yAxisID === 'yCost').reduce((s, i) => s + i.parsed.y, 0);
+              return cost > 0 ? `當週合計 ${usd(cost)}` : '';
+            },
           },
         },
       },

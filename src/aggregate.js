@@ -348,6 +348,7 @@ export function behaviorTrend({ since, until } = {}) {
     readTok: 0,
     writeTok: 0,
     promptCount: 0,
+    byModel: new Map(),
   });
 
   const addTurn = (acc, t) => {
@@ -360,6 +361,7 @@ export function behaviorTrend({ since, until } = {}) {
     acc.promptCount += 1;
     for (const bm of t.byModel ?? []) {
       if (bm.model.startsWith('claude-opus')) acc.opusCost += bm.cost;
+      acc.byModel.set(bm.model, (acc.byModel.get(bm.model) ?? 0) + (bm.cost ?? 0));
     }
   };
 
@@ -370,6 +372,9 @@ export function behaviorTrend({ since, until } = {}) {
     reuse: acc.writeTok ? acc.readTok / acc.writeTok : 0,
     avgCostPerPrompt: acc.promptCount ? acc.totalCost / acc.promptCount : 0,
     promptCount: acc.promptCount,
+    byModel: [...acc.byModel.entries()]
+      .map(([model, cost]) => ({ model, cost }))
+      .sort((a, z) => z.cost - a.cost),
   });
 
   // Previous equal-length window: [since - len, since - 1day].
