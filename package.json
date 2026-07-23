@@ -3,11 +3,14 @@
   "version": "1.1.0",
   "private": true,
   "description": "Local dashboard for Claude Code / Codex / Gemini token usage and cost, with per-prompt attribution",
+  "author": "SKH",
   "type": "module",
-  "main": "src/server.js",
+  "main": "electron/main.js",
   "scripts": {
     "start": "node src/server.js",
-    "verify": "node src/verify.js"
+    "verify": "node src/verify.js",
+    "app": "electron .",
+    "dist": "electron-builder --win"
   },
   "engines": {
     "node": ">=20"
@@ -15,5 +18,42 @@
   "dependencies": {
     "ccusage": "^20.0.17",
     "express": "^4.21.2"
+  },
+  "build": {
+    "appId": "org.skh.aitokenanalysis",
+    "productName": "AI 用量儀表板",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "electron/**",
+      "src/**",
+      "public/**",
+      "prices.json"
+    ],
+    "asarUnpack": [
+      "node_modules/@ccusage/**",
+      "node_modules/ccusage/**"
+    ],
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ],
+      "icon": "build/icon.ico"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "artifactName": "AITokenAnalysis-Setup-${version}.${ext}"
+    },
+    "portable": {
+      "artifactName": "AITokenAnalysis-Portable-${version}.${ext}"
+    }
+  },
+  "devDependencies": {
+    "electron": "^43.2.0",
+    "electron-builder": "^26.15.3"
   }
 }

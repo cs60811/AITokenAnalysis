@@ -16,7 +16,8 @@ export const CLAUDE_PROJECTS_DIR =
     ? path.join(process.env.CLAUDE_CONFIG_DIR, 'projects')
     : path.join(os.homedir(), '.claude', 'projects');
 
-export const CACHE_DIR = path.join(ROOT, '.cache');
+/** Overridable because ROOT is read-only inside a packaged Electron app (asar). */
+export const CACHE_DIR = process.env.AITA_CACHE_DIR || path.join(ROOT, '.cache');
 export const PARSED_CACHE_FILE = path.join(CACHE_DIR, 'parsed.json');
 export const PRICES_CACHE_FILE = path.join(CACHE_DIR, 'prices.json');
 export const PRICES_SNAPSHOT_FILE = path.join(ROOT, 'prices.json');

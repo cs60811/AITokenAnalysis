@@ -4,7 +4,30 @@
 
 資料全部來自本機記錄檔，除了抓取模型定價外**不會對外傳送任何資料**；服務只綁定 `127.0.0.1`。
 
-## 快速開始（同仁安裝指引）
+## 桌面版（最簡單，建議一般同仁使用）
+
+從 [Releases](https://github.com/cs60811/AITokenAnalysis/releases/latest) 下載
+`AITokenAnalysis-Setup-x.y.z.exe` 雙擊安裝（也有免安裝的 `Portable` 版）。
+**不需要 Node.js、不需要 ccusage、不需要系統管理員權限**（安裝到使用者目錄）。
+
+- 首次執行若出現 SmartScreen 藍色警告（未簽章），點「**其他資訊**」→「**仍要執行**」。
+- 資料一樣全在本機：伺服器只綁 `127.0.0.1` 隨機 port，快取放在 `%APPDATA%\AITokenAnalysis\cache`。
+- 有新版本時右下角會出現通知，點「前往下載新版」會開啟 Releases 頁面下載安裝。
+- 前提不變：本機要有 Claude Code 的使用紀錄（`~/.claude/projects`）。
+
+維護者建置與發版：
+
+```bash
+npm run dist   # 產出 release/AITokenAnalysis-Setup-x.y.z.exe 與 Portable 版
+```
+
+發版流程：`npm version minor` → push master → `npm run dist` → 把 Setup／Portable 上傳到
+GitHub Release。桌面版與 zip 版的更新通知都比對 master 上 `package.json` 的 `version`，
+**沒 bump 版號使用者就不會收到通知**。公司網路擋 GitHub 大檔時，建置前先設
+`ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/` 與
+`ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-builder-binaries/`。
+
+## 網頁版快速開始（開發者／進階同仁）
 
 1. 安裝 [Node.js](https://nodejs.org/zh-tw) **20 以上版本**（安裝時一路「下一步」即可）。
 2. 取得本專案：git clone，或解壓縮 zip（分享 zip 時請排除 `node_modules/` 與 `.cache/`）。
@@ -37,6 +60,7 @@ npm run verify # 對帳驗證（見下方）
 
 | 安裝方式 | 檢查方式 | 按鈕行為 |
 |---|---|---|
+| **桌面版 exe** | 比對 GitHub 上 `package.json` 的 `version` | 「前往下載新版」：開啟 Releases 頁面，下載新版安裝 |
 | **git clone** | `git fetch` 比對追蹤分支 | 「立即更新」：自動 `git pull --ff-only`、重裝相依並重啟，頁面自動重整 |
 | **下載 zip** | 比對 GitHub 上 `package.json` 的 `version` | 「前往下載新版」：開啟 zip 下載，解壓覆蓋後重跑 `start.bat` |
 

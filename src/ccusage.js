@@ -7,6 +7,36 @@ import { CCUSAGE_MAX_BUFFER, CCUSAGE_TIMEOUT_MS } from './config.js';
 const require = createRequire(import.meta.url);
 
 /**
+ * ccusage 20.x ships per-platform native binaries (optionalDependencies); its
+ * cli.js is only a wrapper that spawns them. Running the native exe directly
+ * skips a process hop and — crucially — works inside a packaged Electron app,
+ * where process.execPath is electron.exe rather than node.
+ */
+const NATIVE_PKG = {
+  'win32-x64': '@ccusage/ccusage-win32-x64',
+  'win32-arm64': '@ccusage/ccusage-win32-arm64',
+  'darwin-arm64': '@ccusage/ccusage-darwin-arm64',
+  'darwin-x64': '@ccusage/ccusage-darwin-x64',
+  'linux-x64': '@ccusage/ccusage-linux-x64',
+  'linux-arm64': '@ccusage/ccusage-linux-arm64',
+}[`${process.platform}-${process.arch}`];
+
+function findNativeExe() {
+  if (!NATIVE_PKG) return null;
+  const sub = process.platform === 'win32' ? 'bin/ccusage.exe' : 'bin/ccusage';
+  try {
+    // An exe cannot be spawned from inside app.asar; electron-builder unpacks it
+    // beside the archive (asarUnpack), so redirect the resolved path there.
+    const p = require
+      .resolve(`${NATIVE_PKG}/${sub}`)
+      .replace(`${path.sep}app.asar${path.sep}`, `${path.sep}app.asar.unpacked${path.sep}`);
+    return fs.existsSync(p) ? p : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Locate ccusage's real JS entrypoint so we can run it with node directly.
  *
  * The `ccusage` on PATH is a .cmd/.ps1/sh shim trio. Since Node 20 (the
@@ -71,7 +101,7 @@ export class CcusageError extends Error {
   }
 }
 
-function run(cmd, args) {
+function run(cmd, args, env) {
   return new Promise((resolve, reject) => {
     execFile(
       cmd,
@@ -81,6 +111,7 @@ function run(cmd, args) {
         timeout: CCUSAGE_TIMEOUT_MS,
         maxBuffer: CCUSAGE_MAX_BUFFER,
         windowsHide: true,
+        env: env ?? process.env,
       },
       (err, stdout, stderr) => {
         if (err) {
@@ -96,9 +127,13 @@ function run(cmd, args) {
   });
 }
 
+let exePath;
 let cliPath;
 
 async function invoke(args) {
+  if (exePath === undefined) exePath = findNativeExe();
+  if (exePath) return run(exePath, args);
+
   if (cliPath === undefined) cliPath = findCli();
   if (!cliPath) {
     throw new CcusageError(
@@ -106,10 +141,16 @@ async function invoke(args) {
       'ccusage not found. Install it with: npm install -g ccusage',
     );
   }
-  return run(process.execPath, [cliPath, ...args]);
+  // Under Electron process.execPath is electron.exe — make it behave as node.
+  const env = process.versions.electron
+    ? { ...process.env, ELECTRON_RUN_AS_NODE: '1' }
+    : undefined;
+  return run(process.execPath, [cliPath, ...args], env);
 }
 
 export function cliLocation() {
+  if (exePath === undefined) exePath = findNativeExe();
+  if (exePath) return exePath;
   if (cliPath === undefined) cliPath = findCli();
   return cliPath;
 }

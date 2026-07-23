@@ -1,5 +1,6 @@
 import express from 'express';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   behaviorTrend,
   cacheWriteAnalysis,
@@ -203,6 +204,10 @@ app.get('/api/update-check', asJson((req) => checkForUpdate({ force: req.query.f
 
 /** One-click update: ff-only pull, then self-restart (npm install + npm start). */
 app.post('/api/update', async (req, res) => {
+  // The packaged desktop app can't git-pull or npm-restart itself.
+  if (process.versions.electron) {
+    return res.status(501).json({ error: '桌面版請至 GitHub Releases 下載新版', kind: 'unsupported' });
+  }
   try {
     const r = await applyUpdate();
     res.json({ ok: true, ...r, restarting: r.changed });
@@ -215,20 +220,34 @@ app.post('/api/update', async (req, res) => {
 
 app.use(express.static(path.join(ROOT, 'public')));
 
-const status = await initPricing();
-if (!status.rates) {
-  console.error('WARNING: no pricing data available — costs will show as "—".');
-  console.error(`  ${status.error ?? ''}`);
-} else {
-  const ps = pricingStatus();
-  console.log(`pricing: ${ps.source} (${ps.modelCount} models)${ps.stale ? ' [STALE]' : ''}`);
+/**
+ * Start listening. Exported so the Electron shell can run the same server
+ * in-process on a dynamic port ({ port: 0 }) and read it off the return value.
+ */
+export async function startServer({ host = HOST, port = PORT } = {}) {
+  const status = await initPricing();
+  if (!status.rates) {
+    console.error('WARNING: no pricing data available — costs will show as "—".');
+    console.error(`  ${status.error ?? ''}`);
+  } else {
+    const ps = pricingStatus();
+    console.log(`pricing: ${ps.source} (${ps.modelCount} models)${ps.stale ? ' [STALE]' : ''}`);
+  }
+
+  // 127.0.0.1 only: this data is local and stays local.
+  const server = await new Promise((resolve, reject) => {
+    const s = app.listen(port, host, () => resolve(s));
+    s.on('error', reject);
+  });
+  console.log(`AI usage dashboard: http://${host}:${server.address().port}`);
+
+  // Warm the caches in the background so the first page load skips the ~4s CLI run.
+  fullDaily().catch(() => {});
+  cachedVersion().catch(() => {});
+  return server;
 }
 
-// 127.0.0.1 only: this data is local and stays local.
-app.listen(PORT, HOST, () => {
-  console.log(`AI usage dashboard: http://${HOST}:${PORT}`);
-});
-
-// Warm the caches in the background so the first page load skips the ~4s CLI run.
-fullDaily().catch(() => {});
-cachedVersion().catch(() => {});
+// CLI mode (`node src/server.js`, npm start, start.bat) — same behavior as ever.
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  await startServer();
+}
