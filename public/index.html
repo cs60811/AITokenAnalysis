@@ -44,6 +44,24 @@
       <span class="dash">–</span>
       <input type="date" id="date-until" aria-label="結束日">
     </div>
+    <div class="fontzoom" title="字體大小（Ctrl + / − / 0）">
+      <span class="fz-glyph" id="font-glyph" aria-hidden="true"><b>A</b></span>
+      <span class="fz-div"></span>
+      <button id="font-dec" class="fz-step" aria-label="縮小字體">
+        <svg viewBox="0 0 16 16" width="14" height="14"><path d="M4 8h8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+      </button>
+      <div class="fz-track">
+        <span class="fz-rail"></span><span class="fz-fill" id="font-fill"></span>
+        <input type="range" id="font-range" min="80" max="160" step="5" value="100" aria-label="字體大小">
+      </div>
+      <button id="font-inc" class="fz-step" aria-label="放大字體">
+        <svg viewBox="0 0 16 16" width="14" height="14"><path d="M8 4v8M4 8h8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+      </button>
+      <button id="font-reset" class="fz-pct" aria-label="重設字體大小" title="重設為 100%">
+        <svg class="fz-ri" viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M13 8a5 5 0 1 1-1.9-3.9M11.2 1.8v3h-3" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span id="font-pct">100%</span>
+      </button>
+    </div>
     <button id="theme-toggle" class="btn ghost" title="切換深淺色">◐</button>
     <button id="export" class="btn ghost" title="匯出 ccusage 每日用量 JSON">匯出</button>
     <button id="refresh" class="btn">重新整理</button>

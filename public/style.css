@@ -138,6 +138,58 @@ body {
 }
 .daterange .dash { color: var(--text-muted); }
 
+/* Instrument-style font zoom: a live-growing A, a filled slider track, and a
+   mono % readout that doubles as reset (lit only when off 100%). */
+.fontzoom {
+  display: inline-flex; align-items: center; height: 38px; padding: 3px;
+  border: 1px solid var(--border); border-radius: 9px; background: var(--surface-0);
+}
+.fz-glyph {
+  width: 30px; height: 100%; display: flex; align-items: center; justify-content: center;
+  color: var(--text-secondary); overflow: hidden;
+}
+.fz-glyph b {
+  font-size: var(--fz-gs, 15px); line-height: 1; font-weight: 650;
+  transition: font-size 0.18s cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+.fz-div { width: 1px; background: var(--border); align-self: stretch; margin: 7px 2px; }
+.fz-step {
+  width: 28px; height: 100%; border: 0; background: transparent; cursor: pointer;
+  color: var(--text-muted); display: flex; align-items: center; justify-content: center;
+  border-radius: 6px; transition: background 0.12s, color 0.12s;
+}
+.fz-step:hover { background: var(--surface-1); color: var(--text-primary); }
+.fz-step:active { transform: scale(0.9); }
+.fz-track { position: relative; width: 104px; height: 100%; margin: 0 3px; display: flex; align-items: center; }
+.fz-track input {
+  position: absolute; inset: 0; width: 100%; height: 100%; margin: 0;
+  -webkit-appearance: none; appearance: none; background: transparent; cursor: pointer; z-index: 2;
+}
+.fz-track input::-webkit-slider-thumb {
+  -webkit-appearance: none; width: 13px; height: 13px; border-radius: 50%;
+  background: var(--series-1); border: 2px solid var(--surface-0);
+  box-shadow: 0 0 0 1px var(--border); cursor: pointer; transition: transform 0.12s;
+}
+.fz-track input:hover::-webkit-slider-thumb { transform: scale(1.12); }
+.fz-track input::-moz-range-thumb {
+  width: 13px; height: 13px; border-radius: 50%; background: var(--series-1);
+  border: 2px solid var(--surface-0); cursor: pointer;
+}
+.fz-rail { position: absolute; left: 2px; right: 2px; height: 3px; border-radius: 3px; background: var(--border); z-index: 1; }
+.fz-fill { position: absolute; left: 2px; height: 3px; border-radius: 3px; background: var(--series-1); z-index: 1; width: 25%; }
+.fz-pct {
+  position: relative; min-width: 50px; height: 100%; margin-left: 2px; border: 0;
+  background: transparent; border-radius: 7px; cursor: default;
+  font-family: Consolas, "Cascadia Mono", monospace; font-size: 12px; letter-spacing: -0.02em;
+  color: var(--text-muted); display: flex; align-items: center; justify-content: center; gap: 3px;
+  transition: background 0.12s, color 0.12s;
+}
+.fz-ri { width: 0; opacity: 0; overflow: hidden; transition: width 0.18s, opacity 0.18s, transform 0.3s; }
+.fz-pct.dirty { color: var(--series-1); cursor: pointer; }
+.fz-pct.dirty:hover { background: color-mix(in srgb, var(--series-1) 14%, transparent); }
+.fz-pct.dirty .fz-ri { width: 13px; opacity: 1; }
+.fz-pct.dirty:hover .fz-ri { transform: rotate(-40deg); }
+
 .btn {
   background: var(--series-1); color: #fff; border: 0;
   padding: 7px 14px; border-radius: 6px; cursor: pointer;

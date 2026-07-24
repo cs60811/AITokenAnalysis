@@ -33,11 +33,22 @@ const api = async (path, opts) => {
   return body;
 };
 
+/* UI font zoom (CSS `zoom` on <html>) — one path for web and Electron, which
+   both render this same page. `zoom` doesn't raise devicePixelRatio, so canvas
+   charts would upscale and blur; render() compensates via config.devicePixelRatio. */
+const FONT_MIN = 0.8, FONT_MAX = 1.6, FONT_STEP = 0.1;
+let fontScale = clampFont(parseFloat(localStorage.getItem('font-scale')) || 1);
+function clampFont(v) {
+  // 5% granularity: matches the slider step and keeps ±10% button/keyboard steps clean.
+  return Math.min(FONT_MAX, Math.max(FONT_MIN, Math.round(v * 20) / 20));
+}
+
 let charts = {};
 function render(id, config) {
   charts[id]?.destroy();
   const ctx = document.getElementById(id);
   if (!ctx) return;
+  config.options = { ...config.options, devicePixelRatio: window.devicePixelRatio * fontScale };
   charts[id] = new Chart(ctx, config);
 }
 
@@ -1270,6 +1281,37 @@ $('#theme-toggle').addEventListener('click', () => {
 });
 const saved = localStorage.getItem('theme');
 if (saved) document.documentElement.setAttribute('data-theme', saved);
+
+// Font zoom: enlarge/shrink the whole UI, persisted across sessions.
+// Reflects state into the instrument control — slider, filled track, the
+// live-growing A, and the mono % readout that lights up as reset when off 100%.
+function applyFontScale() {
+  document.documentElement.style.zoom = fontScale;
+  const f = (fontScale - FONT_MIN) / (FONT_MAX - FONT_MIN); // 0..1
+  $('#font-range').value = Math.round(fontScale * 100);
+  $('#font-fill').style.width = `${2 + f * 100}px`;
+  $('#font-glyph').style.setProperty('--fz-gs', `${(12 + f * 10).toFixed(1)}px`);
+  $('#font-pct').textContent = `${Math.round(fontScale * 100)}%`;
+  $('#font-reset').classList.toggle('dirty', fontScale !== 1);
+}
+function setFontScale(v) {
+  fontScale = clampFont(v);
+  localStorage.setItem('font-scale', String(fontScale));
+  applyFontScale();
+  // Re-render charts so their canvas bitmaps stay crisp at the new zoom.
+  showTab(document.querySelector('.tab.active')?.dataset.tab ?? 'overview');
+}
+$('#font-inc').addEventListener('click', () => setFontScale(fontScale + FONT_STEP));
+$('#font-dec').addEventListener('click', () => setFontScale(fontScale - FONT_STEP));
+$('#font-range').addEventListener('input', (e) => setFontScale(e.target.value / 100));
+$('#font-reset').addEventListener('click', () => { if (fontScale !== 1) setFontScale(1); });
+document.addEventListener('keydown', (e) => {
+  if (!(e.ctrlKey || e.metaKey)) return;
+  if (e.key === '=' || e.key === '+') { e.preventDefault(); setFontScale(fontScale + FONT_STEP); }
+  else if (e.key === '-' || e.key === '_') { e.preventDefault(); setFontScale(fontScale - FONT_STEP); }
+  else if (e.key === '0') { e.preventDefault(); setFontScale(1); }
+});
+applyFontScale();
 
 applyPreset(); // default: 近 1 個月
 loadAll().catch((err) => {
