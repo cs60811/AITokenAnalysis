@@ -64,9 +64,22 @@ const dirsIn = (dir) => {
  * and costs ~85ms — on every request, since this runs behind /api/overview.
  * Reaching straight for the two known spots costs ~2ms.
  */
+/**
+ * What the last scan actually saw, reported in the payload.
+ *
+ * Without this, every failure mode collapses into the same blank card and the
+ * only way to tell them apart is to attach a debugger to a machine you may not
+ * have. `rootEntries: 0` means the root is not there (or not readable as a
+ * directory); `files: 32, filesRead: 0` means we found the transcripts and
+ * could not open them — two completely different problems, one glance apart.
+ */
+let lastScan = { rootEntries: 0, files: 0, filesRead: 0, billableLines: 0 };
+
 function transcriptFiles() {
   const out = [];
-  for (const workspace of dirsIn(LOCAL_AGENT_DIR)) {
+  const roots = dirsIn(LOCAL_AGENT_DIR);
+  lastScan = { rootEntries: roots.length, files: 0, filesRead: 0, billableLines: 0 };
+  for (const workspace of roots) {
     for (const conversation of dirsIn(workspace)) {
       for (const run of dirsIn(conversation)) {
         if (!path.basename(run).startsWith('local_')) continue;
@@ -78,6 +91,7 @@ function transcriptFiles() {
       }
     }
   }
+  lastScan.files = out.length;
   return out;
 }
 
@@ -111,13 +125,21 @@ function fingerprint(files) {
 function parseRuns() {
   const files = transcriptFiles();
   const fp = fingerprint(files);
-  if (memo && memo.fp === fp) return memo.runs;
+  if (memo && memo.fp === fp) {
+    // A cache hit skips the read loop, so carry its counts forward — otherwise a
+    // perfectly healthy memo hit reports "files found, none read".
+    lastScan.filesRead = memo.scan.filesRead;
+    lastScan.billableLines = memo.scan.billableLines;
+    return memo.runs;
+  }
 
   const byKey = new Map();
   const meta = new Map(); // run -> { task, prompt, models }
   for (const file of files) {
     const run = runOf(file);
-    for (const line of readLines(file)) {
+    const lines = readLines(file);
+    if (lines.length) lastScan.filesRead++;
+    for (const line of lines) {
       const info = meta.get(run) ?? { task: null, prompt: null, models: new Set() };
       meta.set(run, info);
       if (line.type === 'user' && !line.isMeta && !line.isSidechain) {
@@ -130,6 +152,7 @@ function parseRuns() {
         }
       }
       if (!isBillable(line)) continue;
+      lastScan.billableLines++;
       info.models.add(line.message.model);
       const k = keyOf(line);
       let cost = 0;
@@ -170,7 +193,7 @@ function parseRuns() {
       };
     })
     .sort((a, z) => String(a.firstTs).localeCompare(String(z.firstTs)));
-  memo = { fp, runs: list };
+  memo = { fp, runs: list, scan: { filesRead: lastScan.filesRead, billableLines: lastScan.billableLines } };
   return list;
 }
 
@@ -233,7 +256,7 @@ export function localAgentSpend({ since, until } = {}) {
   try {
     all = parseRuns();
   } catch (err) {
-    return { available: false, error: err.message, cost: 0, runs: 0, tokens: 0, firstDay: null, lastDay: null, dataDir: LOCAL_AGENT_DIR };
+    return { available: false, error: err.message, cost: 0, runs: 0, tokens: 0, firstDay: null, lastDay: null, dataDir: LOCAL_AGENT_DIR, scan: lastScan };
   }
   const runs = all.filter((r) => (!since || (r.day && r.day >= since)) && (!until || (r.day && r.day <= until)));
   return {
@@ -248,5 +271,6 @@ export function localAgentSpend({ since, until } = {}) {
     totalCost: all.reduce((s, r) => s + r.cost, 0),
     totalRuns: all.length,
     dataDir: LOCAL_AGENT_DIR,
+    scan: lastScan,
   };
 }

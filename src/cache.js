@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import { analyzeAll } from './attribute.js';
 import { allFilesOf, discoverSessions } from './discover.js';
 import { CACHE_VERSION } from './config.js';
+import { getReadErrors, resetReadErrors } from './parser.js';
 
 /**
  * Whole-corpus memo, invalidated by a fingerprint over every transcript's
@@ -44,12 +45,16 @@ export function getAnalysis({ force = false } = {}) {
   }
 
   const started = Date.now();
+  resetReadErrors();
   const sessionList = analyzeAll(sessions);
   const data = {
     sessions: sessionList,
     generatedAt: new Date().toISOString(),
     parseMs: Date.now() - started,
     fileCount: [...sessions.values()].reduce((n, s) => n + allFilesOf(s).length, 0),
+    // Transcripts that could not be opened during THIS analysis. Cost inside
+    // them is missing from every number on the dashboard, so it has to be said.
+    readErrors: getReadErrors(),
   };
   memo = { fingerprint: fp, data };
   return { ...data, cached: false };

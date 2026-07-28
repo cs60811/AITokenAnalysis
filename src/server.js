@@ -193,6 +193,7 @@ app.get(
         generatedAt: analysis.generatedAt,
         cached: analysis.cached,
         dataDir: CLAUDE_PROJECTS_DIR,
+        readErrors: analysis.readErrors ?? [],
       },
       unattributed: { cost: un, pct: ours ? (un / ours) * 100 : 0 },
       reconcile,

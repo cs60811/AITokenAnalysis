@@ -1027,6 +1027,17 @@ function drawHealth() {
     cls = 'warn';
     msgs.push(`與 ccusage 對帳誤差 ${h.reconcile.pct.toFixed(2)}%，超過 ${h.reconcile.tolerancePct}% 容差。`);
   }
+  // Cost inside an unreadable transcript is missing from every number on the
+  // page. Silence there would look exactly like "you spent less".
+  const unread = h.analysis?.readErrors ?? [];
+  if (unread.length) {
+    cls = 'error';
+    const codes = [...new Set(unread.map((e) => e.code))].join('、');
+    msgs.push(
+      `有 ${num(unread.length)} 個對話檔讀取失敗（${escapeHtml(codes)}），` +
+      `其中的成本沒有計入任何數字。範例：<code>${escapeHtml(unread[0].file)}</code>`,
+    );
+  }
   // Without this the card just disappears, which reads as "no such spend"
   // rather than "could not read it".
   if (state.overview?.localAgent?.error) {

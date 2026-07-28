@@ -84,12 +84,27 @@ export function firstTimestamp(file) {
   return null;
 }
 
+/**
+ * Transcripts we could not open, since the last resetReadErrors().
+ *
+ * An unreadable transcript used to be indistinguishable from an empty one: the
+ * cost in it silently became $0 and nothing anywhere said so. Throwing instead
+ * would be worse — a file briefly locked while Claude Code writes it would take
+ * the whole dashboard down — so the read still degrades to "no lines", but it
+ * is now counted and surfaced in /api/health.
+ */
+let readErrors = [];
+export const getReadErrors = () => readErrors;
+export const resetReadErrors = () => { readErrors = []; };
+
 export function readLines(file) {
   const out = [];
   let raw;
   try {
     raw = fs.readFileSync(file, 'utf8');
-  } catch {
+  } catch (err) {
+    // ENOENT is routine: a session can be deleted between the scan and the read.
+    if (err.code !== 'ENOENT') readErrors.push({ file, code: err.code ?? 'unknown' });
     return out;
   }
   for (const line of raw.split('\n')) {
