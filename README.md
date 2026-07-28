@@ -135,7 +135,9 @@ cost = input  * input_cost_per_token
 
 1. **dedup 必須跨 session 全域執行。** 續接（resume）session 會把先前對話重播進新檔，實測有 **592 則訊息、$133.64 重複**。只在單一 session 內 dedup 會讓總額高估 14%。
    系統依時間順序處理，讓**原始 session** 保留成本（續接並沒有再花一次錢）。
-2. **語句分類器**：實測 551 筆有文字的 user 行中只有 360 筆是真人輸入，其餘是 IDE 事件、slash command 等噪音。prompt 有三種格式：`string`、`array[text]`、`array[image,text]`。
+2. **語句分類器**：實測 757 筆有文字的 user 行中有 584 筆是真人動作，其餘 23% 是 IDE 事件、local-command 管線、任務通知等噪音。prompt 有三種格式：`string`、`array[text]`、`array[image,text]`。
+
+   **slash 指令算真人動作**，不是噪音——`/code-review` 是人按下去的，而且很貴。曾把它當噪音過濾，導致 15 個以指令開場的 session 完全沒有可歸因的 prompt，$63.59 變成孤兒。只有「有 `<command-args>` 標籤但內容為空」的純設定指令（`/clear`、`/effort` 等，成本皆為 $0.00）會被排除。
 
 ## 驗證 (`npm run verify`)
 
@@ -146,10 +148,16 @@ cost = input  * input_cost_per_token
 3. 語句分類器有效過濾噪音
 4. 三層成本切分（own / subagent / workflow）
 5. 未歸因成本 < 5%
-6. **全域對帳閘門**：本工具總額 vs `ccusage daily`，容差 2%（實測 ~1.0%）
+6. **全域對帳閘門**：本工具總額 vs `ccusage daily`，容差 1%（實測 0.00%，逐模型皆分毫不差）
 
-> 對帳有約 1% 的既知落差（ccusage 略高）。已排除：解析範圍不足、跨 session 重複、未定價模型。
-> 這 1% 已足以確認金額正確，故以 2% 作為容差；欲進一步收斂需比對 ccusage 內部實作。
+> 曾有約 1% 的落差（ccusage 略高），後來擴大到 2% 以上，已找出並修正兩個各佔約 1% 的原因：
+> - **串流訊息的部分寫入**：同一則 assistant 訊息會以相同 `id|requestId` 反覆寫入記錄檔，
+>   `output_tokens` 逐次增長（本機 1307 組，無一例外遞增）。原本取第一筆＝取到未寫完的計數。
+> - **advisor 層**：high effort 的回合會另外請 advisor 模型作答，該次請求記在
+>   `usage.iterations[]` 的 `advisor_message`，且**不含**在最外層 usage 內
+>   （本機 15030 筆帶 iterations 的記錄，最外層一律等於非 advisor iterations 之和）。
+>
+> 容差留 1% 是給快取時間差：儀表板拿即時解析結果比對最舊 5 分鐘的 ccusage 文件。
 
 ## 架構
 

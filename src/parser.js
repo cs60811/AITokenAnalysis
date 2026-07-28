@@ -3,17 +3,18 @@ import { SNIPPET_CHARS } from './config.js';
 
 /**
  * Prefixes that mark a user line as machine-generated rather than something the
- * human typed. Measured across all 74 main transcripts: of 551 user lines with
- * extractable text, only 360 are real prompts — the rest are IDE events, slash
- * command plumbing, and task notifications. Ranking that noise would bury the
- * actual expensive prompts.
+ * human typed: IDE events, local-command plumbing, task notifications. Ranking
+ * that noise would bury the actual expensive prompts.
+ *
+ * A slash-command invocation is NOT on this list, deliberately. `/code-review`
+ * is a real thing a human did, and it owns real spend: treating it as noise left
+ * every session that opened with one — 15 of them here — with no attributable
+ * prompt at all, orphaning $63.59 of main-transcript cost. See commandOf().
  */
 const NOISE_PREFIXES = [
   '<local-command-caveat>',
   '<local-command-stdout>',
   '<local-command-stderr>',
-  '<command-name>',
-  '<command-message>',
   '<command-args>',
   '<task-notification>',
   '<system-reminder>',
@@ -102,8 +103,36 @@ export function readLines(file) {
   return out;
 }
 
+const COMMAND_NAME_RE = /<command-name>\s*([^<]*?)\s*<\/command-name>/;
+const COMMAND_ARGS_RE = /<command-args>([\s\S]*?)<\/command-args>/;
+
 /**
- * True when this line is a prompt a human actually typed.
+ * A slash-command invocation, or null when the text is not one.
+ *
+ * Two wire shapes on this data (142 lines): built-in commands put
+ * `<command-name>` first and ALWAYS carry a `<command-args>` tag; skill and
+ * custom commands put `<command-message>` first and carry the tag only when the
+ * user actually passed arguments.
+ */
+function commandOf(text) {
+  const m = COMMAND_NAME_RE.exec(text);
+  if (!m) return null;
+  const a = COMMAND_ARGS_RE.exec(text);
+  return { name: m[1].trim(), args: a ? a[1].trim() : null, hasArgsTag: Boolean(a) };
+}
+
+/**
+ * True when this line is a prompt a human actually typed — or a slash command
+ * they invoked, which is the same thing for our purposes: a deliberate user
+ * action that causes spend.
+ *
+ * The `hasArgsTag && !args` rule drops no-op settings commands (/clear, /effort,
+ * /agents, /upgrade, /login) structurally, rather than via a name list that goes
+ * stale as Claude Code adds commands. Every one of those turns costs $0.00 here,
+ * so it is a ranking decision, not an accounting one; worst case a future no-arg
+ * command that does real work gets folded into the preceding prompt rather than
+ * becoming unattributable. `/model claude-fable-5` carries args and so survives —
+ * that is intended, it is a real action, and cost-sorting sinks it to the bottom.
  *
  * Deliberately does NOT use `promptSource` — verified unreliable on this data
  * (`sdk` covers both human and machine prompts; only 2 of 470 lines were `typed`).
@@ -116,12 +145,24 @@ export function isRealPrompt(line) {
   if (!raw) return false;
   const t = raw.trim();
   if (!t) return false;
+  if (t.startsWith('<command-name>') || t.startsWith('<command-message>')) {
+    const cmd = commandOf(t);
+    if (!cmd) return false; // malformed plumbing, still noise
+    return !(cmd.hasArgsTag && !cmd.args);
+  }
   return !NOISE_PREFIXES.some((p) => t.startsWith(p));
 }
 
-/** The prompt text of a line already known to satisfy isRealPrompt(). */
+/**
+ * The prompt text of a line already known to satisfy isRealPrompt().
+ * A command renders as `/code-review` or `/goal 增加字體縮放`, never as the raw
+ * XML blob — snippet() and every UI that shows it inherit this for free.
+ */
 export function promptTextOf(line) {
-  return (textOf(line.message?.content) ?? '').trim();
+  const t = (textOf(line.message?.content) ?? '').trim();
+  const cmd = commandOf(t);
+  if (!cmd) return t;
+  return cmd.args ? `${cmd.name} ${cmd.args}` : cmd.name;
 }
 
 /** An assistant line that carries billable usage. */
@@ -141,6 +182,24 @@ export function dedupKey(line) {
   const id = line.message?.id;
   const rid = line.requestId;
   return id && rid ? `${id}|${rid}` : `uuid:${line.uuid}`;
+}
+
+/**
+ * key -> the FINAL usage record for that message within one file.
+ *
+ * A streamed assistant message is appended once per partial write: same
+ * id|requestId, output_tokens growing with each write ([3, 3, 276] is typical;
+ * 1307 such groups on this corpus, every one monotonic). Only the last write is
+ * complete, and it is the one ccusage counts — taking the first, as we did,
+ * under-reported the global total by 1.05%.
+ *
+ * Returns usage only; the caller still counts the FIRST occurrence so the
+ * parentUuid chain that assigns cost to a turn stays intact.
+ */
+export function finalUsageByKey(lines) {
+  const out = new Map();
+  for (const line of lines) if (isBillable(line)) out.set(dedupKey(line), line.message.usage);
+  return out;
 }
 
 export function snippet(text, n = SNIPPET_CHARS) {

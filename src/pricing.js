@@ -146,6 +146,24 @@ export function costOf(usage, model) {
   );
 }
 
+/**
+ * The (model, usage) pairs one transcript entry bills for — usually just itself.
+ *
+ * A high-effort turn consults an advisor model and records that request as an
+ * extra `usage.iterations[]` entry of type `advisor_message`, carrying its own
+ * `model`. Those tokens are NOT in the top-level usage: verified on all 15,030
+ * iteration-carrying entries here, the top level equals the sum of the
+ * non-advisor iterations exactly. ccusage bills the advisor; missing it
+ * under-reported our total by 1.03%, all of it opus.
+ */
+export function billableParts(usage, model) {
+  const parts = [{ model, usage }];
+  for (const it of usage?.iterations ?? []) {
+    if (it?.type === 'advisor_message') parts.push({ model: it.model ?? model, usage: it });
+  }
+  return parts;
+}
+
 /** Break a usage record into the four token classes the UI must show separately. */
 export function tokensOf(usage) {
   const cc = usage?.cache_creation ?? {};

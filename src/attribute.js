@@ -1,17 +1,20 @@
 import path from 'node:path';
-import { costOf, hasRates, tokensOf } from './pricing.js';
+import { billableParts, costOf, hasRates, tokensOf } from './pricing.js';
 import {
   dedupKey,
+  finalUsageByKey,
   firstTimestamp,
   isBillable,
   isRealPrompt,
   promptTextOf,
   readLines,
   snippet,
+  textOf,
 } from './parser.js';
 import { allFilesOf } from './discover.js';
 
 const UNATTRIBUTED = '__unattributed__';
+const TASK_ID_RE = /<task-id>\s*([^<\s]+)\s*<\/task-id>/;
 
 function emptyTokens() {
   return { input: 0, output: 0, cacheWrite5m: 0, cacheWrite1h: 0, cacheRead: 0 };
@@ -53,22 +56,26 @@ function costOfAgentFile(file, seen) {
   const byModel = [];
   const unpriced = new Set();
 
-  for (const line of readLines(file)) {
+  const lines = readLines(file);
+  const finalUsage = finalUsageByKey(lines);
+
+  for (const line of lines) {
     if (!isBillable(line)) continue;
     const key = dedupKey(line);
     if (seen.has(key)) continue;
     seen.add(key);
 
-    const model = line.message.model;
-    const tk = tokensOf(line.message.usage);
-    addTokens(tokens, tk);
-    if (!hasRates(model)) {
-      unpriced.add(model);
-      continue;
+    for (const part of billableParts(finalUsage.get(key), line.message.model)) {
+      const tk = tokensOf(part.usage);
+      addTokens(tokens, tk);
+      if (!hasRates(part.model)) {
+        unpriced.add(part.model);
+        continue;
+      }
+      const c = costOf(part.usage, part.model) ?? 0;
+      cost += c;
+      byModel.push([part.model, c, tk]);
     }
-    const c = costOf(line.message.usage, model) ?? 0;
-    cost += c;
-    byModel.push([model, c, tk]);
   }
   return { cost, tokens, byModel, unpriced };
 }
@@ -81,11 +88,26 @@ function costOfAgentFile(file, seen) {
  *   parentUuid, until the next real prompt. Agents spawned inside that turn roll
  *   their cost up into it.
  *
- * Linkage (both verified on this data):
+ * Linkage (all verified on this data):
  *   subagent file  -> its `agentId` appears in a main-file line's toolUseResult.agentId
  *   workflow agent -> its `runId` (the wf_* dir name) appears in toolUseResult.runId
- * In both cases that main-file line sits inside a turn, so we walk parentUuid up
+ *   background task -> its id appears as <task-id> in a <task-notification> line
+ * In each case that main-file line sits inside a turn, so we walk parentUuid up
  * from it to find the owning prompt.
+ *
+ * 57 subagent files are named by no toolUseResult.agentId at all — the desktop
+ * app enqueues those and never writes the spawning tool_use to the main
+ * transcript. The <task-id> route recovers 11 of them. The remaining 47 stay
+ * unattributed on purpose: the only thing left that could link them is matching
+ * on timestamps, and a guess is worse than an honest gap in a tool whose whole
+ * claim is that every dollar is traceable.
+ *
+ * Two routes that look promising and are NOT (measured, don't re-derive them):
+ * the <tool-use-id> inside a task-notification resolves to a real tool_use block
+ * for 0 of the 45 unlinked agents that carry one, and `sourceToolAssistantUUID`
+ * on the agent file's first line resolves for 0 of 48. Both fail structurally —
+ * if that tool_use had reached the main transcript, its tool_result would carry
+ * agentId and the first route would already have matched.
  *
  * Costs stay split three ways because `ccusage session` counts only main+subagent
  * and silently drops the workflow tier — on ced37f19 that hides $25.24 (22%).
@@ -157,6 +179,7 @@ export function analyzeSession(session, seen = new Set()) {
   let lastActivity = null;
 
   // 1) main-transcript cost -> ownCost of the owning turn
+  const finalUsage = finalUsageByKey(mainLines);
   for (const line of mainLines) {
     cwd ??= line.cwd ?? null;
     gitBranch ??= line.gitBranch ?? null;
@@ -169,35 +192,60 @@ export function analyzeSession(session, seen = new Set()) {
     if (seen.has(key)) continue;
     seen.add(key);
 
-    const model = line.message.model;
-    const tk = tokensOf(line.message.usage);
     const owner = ownerPromptOf(line.uuid) ?? UNATTRIBUTED;
     const turn = turns.get(owner) ?? turns.get(UNATTRIBUTED);
 
-    addTokens(turn.tokens, tk);
-    addTokens(sessionBucket.tokens, tk);
-    if (!hasRates(model)) {
-      turn.unpricedModels.add(model);
-      sessionBucket.unpricedModels.add(model);
-      continue;
+    for (const { model, usage } of billableParts(finalUsage.get(key), line.message.model)) {
+      const tk = tokensOf(usage);
+      addTokens(turn.tokens, tk);
+      addTokens(sessionBucket.tokens, tk);
+      if (!hasRates(model)) {
+        turn.unpricedModels.add(model);
+        sessionBucket.unpricedModels.add(model);
+        continue;
+      }
+      const c = costOf(usage, model) ?? 0;
+      turn.ownCost += c;
+      sessionBucket.ownCost += c;
+      addToModel(turn, model, c, tk);
+      addToModel(sessionBucket, model, c, tk);
     }
-    const c = costOf(line.message.usage, model) ?? 0;
-    turn.ownCost += c;
-    sessionBucket.ownCost += c;
-    addToModel(turn, model, c, tk);
-    addToModel(sessionBucket, model, c, tk);
   }
 
-  // 2) index the main-file lines that identify spawned agents
+  // 2) index the main-file lines that identify spawned agents.
+  //
+  // Store the raw walk result, null included: writing UNATTRIBUTED into the map
+  // would make the `??` fallbacks below dead code for exactly the agents that
+  // need them — the key is present, it just holds the sentinel. isTurn() tests
+  // for a live turn instead.
   const turnByAgentId = new Map();
   const turnByRunId = new Map();
+  const turnByTaskId = new Map();
   for (const line of mainLines) {
     const r = line.toolUseResult;
-    if (!r || typeof r !== 'object') continue;
-    const owner = ownerPromptOf(line.uuid) ?? UNATTRIBUTED;
-    if (r.agentId) turnByAgentId.set(r.agentId, owner);
-    if (r.runId) turnByRunId.set(r.runId, owner);
+    if (r && typeof r === 'object') {
+      const owner = ownerPromptOf(line.uuid);
+      if (r.agentId) turnByAgentId.set(r.agentId, owner);
+      if (r.runId) turnByRunId.set(r.runId, owner);
+    }
+    // A background task announces its agent id in a <task-notification>. Only
+    // the copies that carry a uuid are usable — the same text also lands on
+    // `type: "queue-operation"` lines, which have neither uuid nor parentUuid
+    // and so have no position in the tree to walk up from.
+    if (!line.uuid) continue;
+    const txt = textOf(line.message?.content);
+    if (!txt?.includes('<task-notification>')) continue;
+    const m = TASK_ID_RE.exec(txt);
+    if (m && !turnByTaskId.has(m[1])) turnByTaskId.set(m[1], ownerPromptOf(line.uuid));
   }
+
+  const isTurn = (id) => id != null && id !== UNATTRIBUTED && turns.has(id);
+  const ownerOfAgent = (id, index) => {
+    const direct = index.get(id);
+    if (isTurn(direct)) return direct;
+    const viaTask = turnByTaskId.get(id);
+    return isTurn(viaTask) ? viaTask : UNATTRIBUTED;
+  };
 
   const applyAgentCost = (owner, field, res) => {
     const turn = turns.get(owner) ?? turns.get(UNATTRIBUTED);
@@ -218,13 +266,12 @@ export function analyzeSession(session, seen = new Set()) {
   // 3) plain subagents -> subagentCost (this tier IS counted by ccusage)
   for (const file of session.subagents) {
     const agentId = path.basename(file).replace(/^agent-/, '').replace(/\.jsonl$/, '');
-    const owner = turnByAgentId.get(agentId) ?? UNATTRIBUTED;
-    applyAgentCost(owner, 'subagentCost', costOfAgentFile(file, seen));
+    applyAgentCost(ownerOfAgent(agentId, turnByAgentId), 'subagentCost', costOfAgentFile(file, seen));
   }
 
   // 4) workflow agents -> workflowCost (this tier is what ccusage session drops)
   for (const [runId, files] of session.workflows) {
-    const owner = turnByRunId.get(runId) ?? UNATTRIBUTED;
+    const owner = ownerOfAgent(runId, turnByRunId);
     for (const file of files) {
       applyAgentCost(owner, 'workflowCost', costOfAgentFile(file, seen));
     }

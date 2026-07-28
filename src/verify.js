@@ -80,9 +80,13 @@ async function main() {
 
   console.log('\n5. Tier split on the anchor session');
   const a = analyzeSession(anchor);
+  // Re-baselined when streamed messages started being counted at their final
+  // usage: the anchor's agent files hold partial writes, so subagent (+$0.04)
+  // and workflow (+$3.51) both grew. ownCost is unchanged — this June session
+  // predates the advisor tier and its main transcript has no partial writes.
   check(near(a.ownCost, 86.89144, 0.01), 'ownCost = 86.89 (main only)', `$${a.ownCost.toFixed(5)}`);
-  check(near(a.ccusageCost, 87.41196, 0.01), 'ccusageCost = 87.41 (main + subagents)', `$${a.ccusageCost.toFixed(5)}`);
-  check(near(a.trueCost, 112.65717, 0.01), 'trueCost = 112.66 (incl. workflow)', `$${a.trueCost.toFixed(5)}`);
+  check(near(a.ccusageCost, 87.44705, 0.01), 'ccusageCost = 87.45 (main + subagents)', `$${a.ccusageCost.toFixed(5)}`);
+  check(near(a.trueCost, 116.16848, 0.01), 'trueCost = 116.17 (incl. workflow)', `$${a.trueCost.toFixed(5)}`);
   check(a.workflowCost > 25, 'workflow tier carries the hidden spend', `$${a.workflowCost.toFixed(5)} (${((a.workflowCost / a.trueCost) * 100).toFixed(0)}% of session)`);
 
   const all = analyzeAll(sessions);

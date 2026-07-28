@@ -23,7 +23,7 @@ export const PRICES_CACHE_FILE = path.join(CACHE_DIR, 'prices.json');
 export const PRICES_SNAPSHOT_FILE = path.join(ROOT, 'prices.json');
 
 /** Bump to invalidate every cached rollup after a parser/attribution change. */
-export const CACHE_VERSION = 1;
+export const CACHE_VERSION = 3;
 
 export const PORT = Number(process.env.PORT) || 4317;
 export const HOST = '127.0.0.1';
@@ -38,8 +38,17 @@ export const LITELLM_TIMEOUT_MS = 5000;
 /** Warn in the UI once the pricing snapshot is this old. */
 export const PRICES_STALE_DAYS = 30;
 
-/** Global reconciliation gate: our claude-only total vs `ccusage daily`. Measured 1.01%. */
-export const RECONCILE_TOLERANCE_PCT = 2;
+/**
+ * Global reconciliation gate: our claude-only total vs `ccusage daily`.
+ *
+ * The two accounting gaps this tolerance used to absorb (partial writes of
+ * streamed messages, and the advisor tier) are fixed, and the two totals now
+ * agree to the cent. What is left is staleness: the dashboard compares a fresh
+ * parse against a ccusage document up to CCUSAGE_SWR_MS old, so a burst of
+ * spend inside that window shows up as drift. 1% covers that with room while
+ * still catching a real regression — each of the two bugs above was ~1% alone.
+ */
+export const RECONCILE_TOLERANCE_PCT = 1;
 
 /** Fail if more than this share of cost cannot be tied back to a prompt. */
 export const UNATTRIBUTED_TOLERANCE_PCT = 5;
