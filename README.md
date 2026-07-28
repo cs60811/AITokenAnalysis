@@ -159,6 +159,20 @@ cost = input  * input_cost_per_token
 >
 > 容差留 1% 是給快取時間差：儀表板拿即時解析結果比對最舊 5 分鐘的 ccusage 文件。
 
+### local agent 排程任務（兩邊都看不到的支出）
+
+桌面版 local agent mode（在 UI 設定的排程任務）把記錄寫在
+`%APPDATA%\claude\local-agent-mode-sessions`，不在 `~/.claude/projects` 底下，**ccusage 也不讀這個目錄**。
+實測本機 483 個 message id 與主目錄的 7611 個完全不重疊，確定是額外的錢。
+
+首頁以獨立卡片顯示（跟著日期篩選走），**刻意不計入總成本**：對帳閘門要拿我們的數字比 ccusage 的，
+把 ccusage 看不到的錢加進去會讓那道閘門永遠有雜訊。
+
+兩個實作上的坑：每則訊息會同時寫進 `audit.jsonl` 和巢狀的 `.claude/projects/**`，而 audit 副本
+**沒有 `requestId`**，共用的 `dedupKey()` 會退化成 uuid 而重複計算（金額會翻成 2.6 倍），
+故此模組改以 `message.id` 為鍵；另外每個 run 都帶一份 skill 套件的副本，遞迴掃描要跨 ~430 個目錄
+（~85ms／次），因此改為直接讀取已知的兩個固定位置。
+
 ## 架構
 
 ```

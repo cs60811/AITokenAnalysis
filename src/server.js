@@ -16,6 +16,7 @@ import {
 import * as ccusage from './ccusage.js';
 import { cachedVersion, filterDaily, fullDaily, invalidateCcusage, monthlyFromDaily } from './ccusage-cache.js';
 import { getAnalysis, invalidate } from './cache.js';
+import { localAgentDetail, localAgentSpend } from './localagent.js';
 import { applyUpdate, checkForUpdate, scheduleRestart } from './update.js';
 import { initPricing, pricingStatus } from './pricing.js';
 import { CLAUDE_PROJECTS_DIR, HOST, PORT, RECONCILE_TOLERANCE_PCT, ROOT } from './config.js';
@@ -50,9 +51,16 @@ app.get(
       ...ccusage.modelTotalsFromDaily(doc),
       daily: doc.daily,
       monthly: monthlyFromDaily(doc.daily),
+      // Off-books: not in totalCost, and invisible to ccusage. Same range filter
+      // as everything else on this tab, so the card can't disagree with its
+      // neighbours.
+      localAgent: localAgentSpend(range(req)),
     };
   }),
 );
+
+/** Desktop-app local agent mode: spend ccusage cannot see. See localagent.js. */
+app.get('/api/localagent', asJson((req) => localAgentDetail(range(req))));
 
 /** Tab 2: our per-session analysis, with the ccusage-vs-true split. */
 app.get('/api/sessions', asJson((req) => sessionRanking(range(req))));

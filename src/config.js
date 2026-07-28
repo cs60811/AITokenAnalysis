@@ -16,6 +16,18 @@ export const CLAUDE_PROJECTS_DIR =
     ? path.join(process.env.CLAUDE_CONFIG_DIR, 'projects')
     : path.join(os.homedir(), '.claude', 'projects');
 
+/**
+ * The desktop app's local agent mode (the scheduled tasks configured in its UI)
+ * writes transcripts here instead of CLAUDE_PROJECTS_DIR, and ccusage does not
+ * read this root either — see localagent.js. Windows-only path; on a machine
+ * without it, the feature simply reports nothing.
+ */
+export const LOCAL_AGENT_DIR = path.join(
+  process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'),
+  'claude',
+  'local-agent-mode-sessions',
+);
+
 /** Overridable because ROOT is read-only inside a packaged Electron app (asar). */
 export const CACHE_DIR = process.env.AITA_CACHE_DIR || path.join(ROOT, '.cache');
 export const PARSED_CACHE_FILE = path.join(CACHE_DIR, 'parsed.json');
