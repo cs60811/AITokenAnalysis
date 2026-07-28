@@ -253,10 +253,79 @@ code {
   border-radius: 10px; padding: 14px 16px;
 }
 .kpi .label { color: var(--text-muted); font-size: 12px; margin-bottom: 4px; }
-.kpi .value { font-size: 26px; font-weight: 680; letter-spacing: -0.02em; }
+.kpi .value { font-size: 26px; font-weight: 680; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
 .kpi .value.hero { font-size: 34px; }
 .kpi .foot { color: var(--text-muted); font-size: 11.5px; margin-top: 2px; }
 .kpi.accent .value { color: var(--warn); }
+
+/* Overview only: the headline number earns two tracks, and the secondary counts
+   sit in a second row as one-liners rather than competing full-height tiles. */
+.kpi.wide { grid-column: span 2; }
+.kpi.compact {
+  padding: 9px 16px;
+  display: flex; align-items: baseline; justify-content: space-between; gap: 10px;
+}
+.kpi.compact .label { margin-bottom: 0; }
+.kpi.compact .value { font-size: 17px; }
+
+/* Loading. Two different situations, two different treatments: a cold boot has
+   nothing on screen to look at (ccusage takes ~4s), so it gets the placeholder
+   card; a re-filter already has content, and blanking it would be worse than
+   dimming it — the numbers stay readable while the new ones arrive. */
+.progress { height: 2px; overflow: hidden; background: var(--grid); }
+.progress::after {
+  content: ''; display: block; height: 100%; width: 35%;
+  background: var(--series-1); animation: progress-slide 1.1s ease-in-out infinite;
+}
+@keyframes progress-slide {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(386%); }
+}
+body.loading main { opacity: 0.5; pointer-events: none; }
+main { transition: opacity 0.12s ease; }
+
+/* Skeleton bones. A pulse rather than the usual sweeping shimmer: the sweep is a
+   moving gradient, and nothing else in this UI has one. Bone geometry copies the
+   real elements it stands in for, so data landing changes colour, not layout. */
+.sk {
+  background: var(--grid); border-radius: 4px; color: transparent;
+  animation: sk-pulse 1.4s ease-in-out infinite;
+}
+/* Heights come from the font metrics of the element each bone stands in for,
+   never from guessed pixels: the line box then matches the real one at every
+   width AND at every step of the font-zoom control, so nothing jumps when the
+   data lands. Each bone holds an &nbsp; to give it that line box — don't add
+   padding or borders to slim the bar, both grow the box and reintroduce a jump. */
+.sk-label { font-size: 12px;   width: 62%; margin-bottom: 4px; }
+.sk-value { font-size: 26px;   width: 48%; }
+.sk-hero  { font-size: 34px;   width: 58%; }
+.sk-num   { font-size: 17px;   width: 42px; }
+.sk-foot  { font-size: 11.5px; width: 84%; margin-top: 2px; }
+@keyframes sk-pulse { 50% { opacity: 0.45; } }
+
+/* Chart bodies are empty boxes until Chart.js draws; give them bones too. */
+.booting .chart-wrap::after {
+  content: ''; position: absolute; inset: 8px 0 26px 34px;
+  background: var(--grid); border-radius: 6px;
+  animation: sk-pulse 1.4s ease-in-out infinite;
+}
+
+.boot-note {
+  display: flex; align-items: center; gap: 9px;
+  margin: 0 0 16px; color: var(--text-muted); font-size: 12.5px;
+}
+.boot-spin {
+  flex: none; width: 14px; height: 14px; border-radius: 50%;
+  border: 2px solid var(--grid); border-top-color: var(--series-1);
+  animation: boot-spin 0.75s linear infinite;
+}
+@keyframes boot-spin { to { transform: rotate(360deg); } }
+
+@media (prefers-reduced-motion: reduce) {
+  .progress::after { animation: none; width: 100%; opacity: 0.5; }
+  .sk, .booting .chart-wrap::after { animation: none; }
+  .boot-spin { animation-duration: 2.4s; }
+}
 
 .chart-wrap { position: relative; height: 280px; }
 .chart-wrap.tall { height: 400px; }

@@ -7,7 +7,7 @@
 <link rel="icon" type="image/svg+xml" href="favicon.svg">
 <link rel="stylesheet" href="style.css">
 </head>
-<body>
+<body class="booting">
 <header class="topbar">
   <div class="brand">
     <svg class="logo" viewBox="0 0 44 44" width="38" height="38" role="img" aria-label="AI 用量儀表板 logo">
@@ -68,6 +68,7 @@
   </div>
 </header>
 
+<div id="progress" class="progress" role="progressbar" aria-label="載入中" aria-busy="true" hidden></div>
 <div id="banner" class="banner" hidden></div>
 
 <nav class="tabs" role="tablist">
@@ -77,12 +78,41 @@
   <button class="tab" data-tab="trend" role="tab">行為趨勢</button>
   <button class="tab" data-tab="prompts" role="tab">語句排行</button>
   <button class="tab" data-tab="sessions" role="tab">Session 排行</button>
+  <!-- Hidden until /api/localagent reports data — most machines have none. -->
+  <button class="tab" data-tab="localagent" role="tab" id="tab-btn-localagent" hidden>local agent 排程</button>
 </nav>
 
 <main>
   <!-- ============ TAB 1 ============ -->
   <section class="panel active" id="tab-overview">
-    <div class="kpi-row" id="kpi-overview"></div>
+    <!-- app.js owns the structure here: two .kpi-row children, money then counts.
+         The skeleton below is seeded in markup so it paints on the first frame
+         (the cold path shells out to ccusage and takes ~4s). drawOverview()
+         replaces this container's innerHTML, so it clears itself — no teardown.
+         Shapes mirror the real cards exactly, so nothing shifts when data lands. -->
+    <div id="kpi-overview" aria-busy="true">
+      <div class="kpi-row">
+        <div class="kpi wide">
+          <div class="sk sk-label">&nbsp;</div><div class="sk sk-hero">&nbsp;</div><div class="sk sk-foot">&nbsp;</div>
+        </div>
+        <div class="kpi">
+          <div class="sk sk-label">&nbsp;</div><div class="sk sk-value">&nbsp;</div><div class="sk sk-foot">&nbsp;</div>
+        </div>
+        <div class="kpi">
+          <div class="sk sk-label">&nbsp;</div><div class="sk sk-value">&nbsp;</div><div class="sk sk-foot">&nbsp;</div>
+        </div>
+      </div>
+      <div class="kpi-row">
+        <div class="kpi compact"><div class="sk sk-label">&nbsp;</div><div class="sk sk-num">&nbsp;</div></div>
+        <div class="kpi compact"><div class="sk sk-label">&nbsp;</div><div class="sk sk-num">&nbsp;</div></div>
+        <div class="kpi compact"><div class="sk sk-label">&nbsp;</div><div class="sk sk-num">&nbsp;</div></div>
+      </div>
+    </div>
+
+    <p class="boot-note" id="boot-note">
+      <span class="boot-spin" aria-hidden="true"></span>
+      正在分析本機使用紀錄…首次載入要執行 ccusage 並解析所有對話檔，大約 4 秒；之後有快取，約 0.3 秒。
+    </p>
 
     <div class="card">
       <div class="card-head">
@@ -283,6 +313,39 @@
     <div class="card">
       <div class="card-head"><h2>各專案成本</h2></div>
       <div class="chart-wrap"><canvas id="chart-projects"></canvas></div>
+    </div>
+  </section>
+
+  <!-- ============ TAB 7 ============ -->
+  <section class="panel" id="tab-localagent">
+    <div class="card callout">
+      <h2>⚠ 這些花費 ccusage 和本工具的總成本都看不到</h2>
+      <p>
+        桌面版 local agent mode（在 UI 設定的排程任務）把記錄寫在
+        <code>%APPDATA%\claude\local-agent-mode-sessions</code>，不在 <code>~/.claude/projects</code> 底下，
+        <strong>ccusage 也不讀這個目錄</strong>。這裡的金額<strong>不計入</strong>首頁總成本——
+        對帳閘門要拿我們的數字比 ccusage 的，把 ccusage 看不到的錢加進去會讓那道閘門永遠有雜訊。
+      </p>
+      <p class="hint" id="la-datadir"></p>
+    </div>
+
+    <div class="kpi-row" id="kpi-localagent"></div>
+
+    <div class="card" id="la-card-tasks">
+      <div class="card-head">
+        <h2>依排程任務</h2>
+        <p class="hint">排程任務會自己持續執行，沒人盯著——這張表回答「它每天在燒多少」。</p>
+      </div>
+      <div class="scroll-x"><table id="table-la-tasks"></table></div>
+    </div>
+
+    <div class="card" id="la-card-runs">
+      <div class="card-head">
+        <h2>每次執行成本</h2>
+        <p class="hint">依時間排列，一根柱子是一次執行。設定當天通常會反覆重跑，之後才是常態。</p>
+      </div>
+      <div class="chart-wrap"><canvas id="chart-la-runs"></canvas></div>
+      <div class="scroll-x"><table id="table-la-runs"></table></div>
     </div>
   </section>
 </main>

@@ -59,7 +59,13 @@ function baseOpts(extra = {}) {
   return {
     responsive: true,
     maintainAspectRatio: false,
-    interaction: { mode: 'nearest', intersect: false },
+    /* Hover by category, never by 2-D proximity. `nearest` (Chart.js' default axis
+       for that mode is 'xy') snaps to the single closest bar *centre*: on a stacked
+       chart that is routinely a neighbouring column, and near the baseline it is one
+       of the zero-height segments — which the label callbacks hide, leaving a bare
+       "date + 合計 $0.00". Matching the whole index also makes the 合計 footers true
+       column totals instead of the sum of whatever one segment got picked. */
+    interaction: { mode: 'index', intersect: false, axis: extra.indexAxis === 'y' ? 'y' : 'x' },
     plugins: {
       legend: {
         labels: { color: css('--text-secondary'), boxWidth: 10, boxHeight: 10, usePointStyle: true, font: { size: 11 } },
@@ -85,7 +91,7 @@ function baseOpts(extra = {}) {
 }
 
 /* ============================== state ============================== */
-const state = { overview: null, cachewrite: null, improvements: null, trend: null, prompts: null, sessions: null, projects: null, health: null };
+const state = { overview: null, cachewrite: null, improvements: null, trend: null, prompts: null, sessions: null, projects: null, health: null, localagent: null };
 
 /* ============================== date range ============================== */
 const fmtDate = (d) =>
@@ -127,31 +133,52 @@ function drawOverview() {
   const claudeShare = d.totalCost ? (d.claudeCost / d.totalCost) * 100 : 0;
   const ourTrue = state.sessions?.totals.trueCost;
   const hidden = state.sessions?.totals.workflowCost ?? 0;
+  const la = d.localAgent;
 
+  // Money on the top row, counts demoted to a row of compact cards below. Five
+  // equal cards read as "使用模型 10 matters as much as 總成本 $1,042", and the
+  // long Chinese labels here (unlike the other tabs') wrap at that width.
+  //
+  // Two "hidden spend" cards sit side by side and mean opposite things — the
+  // workflow tier IS inside 總成本 (ccusage daily reads those files; only
+  // `ccusage session` drops them), local agent is NOT. The foot lines carry that
+  // distinction, so don't drop them.
+  const models = d.models;
   $('#kpi-overview').innerHTML = `
-    <div class="kpi">
-      <div class="label">總成本（所有 agent）</div>
-      <div class="value hero">${usd(d.totalCost)}</div>
-      <div class="foot">Claude ${usd(d.claudeCost)}（${claudeShare.toFixed(1)}%）· 其他 ${usd(d.otherCost)}</div>
+    <div class="kpi-row">
+      <div class="kpi wide">
+        <div class="label">總成本（所有 agent）</div>
+        <div class="value hero">${usd(d.totalCost)}</div>
+        <div class="foot">Claude ${usd(d.claudeCost)}（${claudeShare.toFixed(1)}%）· 其他 ${usd(d.otherCost)}</div>
+      </div>
+      <div class="kpi accent">
+        <div class="label">workflow subagent</div>
+        <div class="value">${usd(hidden)}</div>
+        <div class="foot">已含在總成本內 · ccusage session 漏算</div>
+      </div>
+      ${la?.available ? `
+      <div class="kpi accent">
+        <div class="label">local agent 排程任務</div>
+        <div class="value">${usd(la.cost)}</div>
+        <div class="foot"><strong>未</strong>含在總成本內 · ${num(la.runs)} 次執行</div>
+      </div>` : ''}
     </div>
-    <div class="kpi accent">
-      <div class="label">ccusage session 看不到的支出</div>
-      <div class="value">${usd(hidden)}</div>
-      <div class="foot">workflow subagent 成本</div>
-    </div>
-    <div class="kpi">
-      <div class="label">已分析語句</div>
-      <div class="value">${num(state.prompts?.totalPrompts ?? 0)}</div>
-      <div class="foot">Claude Code，共 ${num(state.sessions?.sessions.length ?? 0)} 個 session</div>
-    </div>
-    <div class="kpi">
-      <div class="label">使用模型</div>
-      <div class="value">${d.models.length}</div>
-      <div class="foot">${d.models.slice(0, 2).map((m) => m.model).join('、')}…</div>
+    <div class="kpi-row">
+      <div class="kpi compact">
+        <div class="label">已分析語句</div>
+        <div class="value">${num(state.prompts?.totalPrompts ?? 0)}</div>
+      </div>
+      <div class="kpi compact">
+        <div class="label">session</div>
+        <div class="value">${num(state.sessions?.sessions.length ?? 0)}</div>
+      </div>
+      <div class="kpi compact" title="${escapeHtml(models.map((m) => m.model).join('、'))}">
+        <div class="label">使用模型</div>
+        <div class="value">${models.length}</div>
+      </div>
     </div>`;
 
   // Cost by model — ranked magnitude, one bar per entity, entity-stable colour.
-  const models = d.models;
   render('chart-models', {
     type: 'bar',
     data: {
@@ -279,6 +306,10 @@ function drawDailyTrend(period) {
         tooltip: {
           callbacks: {
             label: (c) => (c.parsed.y > 0 ? ` ${c.dataset.label}: ${usd(c.parsed.y)}` : null),
+            // A period can be all zeros — ccusage prices models it doesn't know at
+            // $0.00 (see ccusage.js), so a day of brand-new-model usage arrives as an
+            // invisible column. Say that, rather than showing an empty box.
+            beforeBody: (items) => (items.some((i) => i.parsed.y > 0) ? '' : ' 此期間沒有已計價的用量'),
             footer: (items) => `合計 ${usd(items.reduce((s, i) => s + i.parsed.y, 0))}`,
           },
         },
@@ -996,6 +1027,12 @@ function drawHealth() {
     cls = 'warn';
     msgs.push(`與 ccusage 對帳誤差 ${h.reconcile.pct.toFixed(2)}%，超過 ${h.reconcile.tolerancePct}% 容差。`);
   }
+  // Without this the card just disappears, which reads as "no such spend"
+  // rather than "could not read it".
+  if (state.overview?.localAgent?.error) {
+    cls = 'warn';
+    msgs.push(`讀不到 local agent 排程任務的紀錄（${escapeHtml(state.overview.localAgent.error)}），該筆支出未顯示。`);
+  }
 
   if (msgs.length) {
     b.className = `banner ${cls}`;
@@ -1092,9 +1129,166 @@ async function checkUpdate() {
   }
 }
 
+/* ============================== TAB 7 ============================== */
+/**
+ * Local agent mode: the desktop app's scheduled tasks. Off-books spend — see the
+ * callout in the panel and localagent.js for why it stays out of 總成本.
+ */
+function drawLocalAgent() {
+  const d = state.localagent;
+  if (!d?.available) return;
+
+  const runs = d.runs ?? [];
+
+  // `available` is machine-level: this machine has local agent transcripts, so
+  // the tab exists. The date filter can still select a window with no runs in
+  // it — say what happened and where the data actually is, rather than showing
+  // $0.00 next to a dash and letting it read as broken.
+  $('#la-card-tasks').hidden = runs.length === 0;
+  $('#la-card-runs').hidden = runs.length === 0;
+  if (!runs.length) {
+    const since = $('#date-since').value;
+    const until = $('#date-until').value;
+    const range = since || until ? `${since || '最早'} ~ ${until || '最新'}` : '目前選取的範圍';
+    $('#kpi-localagent').innerHTML = `
+      <div class="kpi" style="grid-column: 1 / -1">
+        <div class="label" style="font-size: 14px; color: var(--text-primary)">這個時間範圍內沒有排程執行</div>
+        <div class="foot">
+          已選 ${escapeHtml(range)}。現有紀錄涵蓋 <strong>${escapeHtml(d.firstDay ?? '—')} 至 ${escapeHtml(d.lastDay ?? '—')}</strong>，
+          ${num(d.totalRuns)} 次執行共 ${usd(d.totalCost)}——把日期拉到那段區間就看得到。
+        </div>
+      </div>`;
+    return;
+  }
+  const scheduled = runs.filter((r) => r.scheduled);
+  // The steady-state number people actually want: what the unattended runs cost
+  // per firing, ignoring the expensive day you sat there tuning the task.
+  const avgScheduled = scheduled.length ? scheduled.reduce((s, r) => s + r.cost, 0) / scheduled.length : 0;
+  const last = runs[0]; // sorted newest first
+
+  $('#la-datadir').textContent = `資料來源：${d.dataDir}`;
+  $('#kpi-localagent').innerHTML = `
+    <div class="kpi wide">
+      <div class="label">local agent 總支出</div>
+      <div class="value hero">${usd(d.cost)}</div>
+      <div class="foot">${num(runs.length)} 次執行 · ${compact(d.tokens)} tokens · 未計入首頁總成本</div>
+    </div>
+    <div class="kpi">
+      <div class="label">排程執行平均每次</div>
+      <div class="value">${usd4(avgScheduled)}</div>
+      <div class="foot">${num(scheduled.length)} 次自動執行，不含手動設定</div>
+    </div>
+    <div class="kpi">
+      <div class="label">最近一次</div>
+      <div class="value">${last ? usd4(last.cost) : '—'}</div>
+      <div class="foot">${last ? `${when(last.startedAt)} · ${escapeHtml(last.task)}` : '—'}</div>
+    </div>`;
+
+  $('#table-la-tasks').innerHTML = `
+    <thead><tr>
+      <th>任務</th><th class="num">執行次數</th><th class="num">總成本</th>
+      <th class="num">平均每次</th><th class="num">tokens</th><th>最近一次</th><th>模型</th>
+    </tr></thead>
+    <tbody>${d.byTask.map((t) => `
+      <tr>
+        <td>${t.scheduled ? `<code>${escapeHtml(t.task)}</code>` : `<span class="muted">${escapeHtml(t.task)}</span>`}</td>
+        <td class="num">${num(t.runs)}</td>
+        <td class="num"><strong>${usd4(t.cost)}</strong></td>
+        <td class="num">${usd4(t.avgCost)}</td>
+        <td class="num muted">${compact(t.tokens)}</td>
+        <td class="muted">${when(t.lastRun)}</td>
+        <td>${t.models.map((m) => `<span class="swatch" style="background:${colorForModel(m)}"></span>`).join('')}${escapeHtml(t.models.map((m) => m.replace(/^claude-/, '')).join('、'))}</td>
+      </tr>`).join('')}
+    </tbody>`;
+
+  // Oldest-first along x so the chart reads left-to-right in time.
+  const series = [...runs].reverse();
+  render('chart-la-runs', {
+    type: 'bar',
+    data: {
+      labels: series.map((r) => (r.startedAt ? r.startedAt.slice(5, 16).replace('T', ' ') : '—')),
+      datasets: [{
+        label: '每次執行成本',
+        data: series.map((r) => r.cost),
+        backgroundColor: series.map((r) => (r.scheduled ? css('--series-1') : css('--series-write'))),
+        borderRadius: 3,
+        borderSkipped: false,
+      }],
+    },
+    options: baseOpts({
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            title: (items) => series[items[0].dataIndex].task,
+            label: (c) => {
+              const r = series[c.dataIndex];
+              return [` ${usd4(r.cost)} · ${num(r.messages)} 則訊息`, ` ${when(r.startedAt)}`, r.scheduled ? ' 排程自動執行' : ' 手動執行'];
+            },
+          },
+        },
+      },
+      scales: {
+        x: { grid: { display: false }, border: { color: css('--axis') }, ticks: { color: css('--text-muted'), font: { size: 10 }, maxRotation: 60 } },
+        y: { grid: { color: css('--grid') }, border: { color: css('--axis') }, ticks: { color: css('--text-muted'), font: { size: 11 }, callback: (v) => `$${v}` } },
+      },
+    }),
+  });
+
+  $('#table-la-runs').innerHTML = `
+    <thead><tr>
+      <th>開始時間</th><th>任務</th><th class="num">成本</th>
+      <th class="num">訊息</th><th class="num">tokens</th><th>起始語句</th>
+    </tr></thead>
+    <tbody>${runs.map((r) => `
+      <tr>
+        <td>${when(r.startedAt)}</td>
+        <td>${r.scheduled ? `<code>${escapeHtml(r.task)}</code>` : `<span class="muted">${escapeHtml(r.task)}</span>`}</td>
+        <td class="num"><strong>${usd4(r.cost)}</strong></td>
+        <td class="num">${num(r.messages)}</td>
+        <td class="num muted">${compact(r.tokens)}</td>
+        <td class="snippet muted">${escapeHtml(r.prompt ?? '—')}</td>
+      </tr>`).join('')}
+    </tbody>`;
+}
+
 /* ============================== boot ============================== */
-async function loadAll() {
-  const [overview, cachewrite, improvements, trend, prompts, sessions, projects, health] = await Promise.all([
+
+/**
+ * Every fetch path goes through here so the page is never silently busy.
+ * Counted rather than boolean: the prompt filters can fire while a range
+ * reload is still in flight, and the first one to finish must not clear the bar.
+ */
+let inflight = 0;
+function setBusy(on) {
+  inflight = Math.max(0, inflight + (on ? 1 : -1));
+  const busy = inflight > 0;
+  $('#progress').hidden = !busy;
+  // Dimming is for reloads only. While the skeleton is up there is nothing
+  // worth reading underneath, and fading it would just make the bones murky.
+  document.body.classList.toggle('loading', busy && !document.body.classList.contains('booting'));
+}
+
+/** The seeded skeleton (index.html) stops being a placeholder and starts being a lie. */
+function clearBootSkeleton() {
+  document.body.classList.remove('booting');
+  $('#kpi-overview').removeAttribute('aria-busy');
+  $('#boot-note')?.remove();
+}
+
+async function withBusy(fn) {
+  setBusy(true);
+  try {
+    return await fn();
+  } finally {
+    setBusy(false);
+  }
+}
+
+const loadAll = () => withBusy(fetchAll);
+
+async function fetchAll() {
+  const [overview, cachewrite, improvements, trend, prompts, sessions, projects, health, localagent] = await Promise.all([
     api(withRange('/api/overview')).catch((e) => ({ error: e.message, models: [], daily: [], monthly: [], totalCost: 0, claudeCost: 0, otherCost: 0 })),
     api(withRange('/api/cache-writes', { limit: 30 })),
     api(withRange('/api/improvements')),
@@ -1103,8 +1297,12 @@ async function loadAll() {
     api(withRange('/api/sessions')),
     api(withRange('/api/projects')),
     api('/api/health'),
+    // Optional feature: a machine without local agent mode must not fail the load.
+    api(withRange('/api/localagent')).catch(() => ({ available: false, runs: [], byTask: [] })),
   ]);
-  Object.assign(state, { overview, cachewrite, improvements, trend, prompts, sessions, projects, health });
+  Object.assign(state, { overview, cachewrite, improvements, trend, prompts, sessions, projects, health, localagent });
+
+  $('#tab-btn-localagent').hidden = !localagent.available;
 
   const sel = $('#filter-project');
   if (sel.options.length <= 1) {
@@ -1119,16 +1317,17 @@ async function loadAll() {
   // Only the visible tab draws — see showTab() for why hidden charts must not be built.
   showTab(document.querySelector('.tab.active')?.dataset.tab ?? 'overview');
   drawHealth();
+  clearBootSkeleton(); // real content has landed
 }
 
-async function reloadPrompts() {
+const reloadPrompts = () => withBusy(async () => {
   state.prompts = await api(
     withRange('/api/prompts', { limit: $('#filter-limit').value, project: $('#filter-project').value }),
   );
   drawPrompts();
-}
+});
 
-const DRAW = { overview: drawOverview, cachewrite: drawCacheWrite, improve: drawImprove, trend: drawTrend, prompts: drawPrompts, sessions: drawSessions };
+const DRAW = { overview: drawOverview, cachewrite: drawCacheWrite, improve: drawImprove, trend: drawTrend, prompts: drawPrompts, sessions: drawSessions, localagent: drawLocalAgent };
 
 /**
  * Show a tab and (re)build its charts.
@@ -1318,5 +1517,8 @@ loadAll().catch((err) => {
   $('#banner').className = 'banner error';
   $('#banner').textContent = `載入失敗：${err.message}`;
   $('#banner').hidden = false;
+  // Otherwise the skeleton keeps claiming it is still analysing.
+  clearBootSkeleton();
+  $('#kpi-overview').innerHTML = '';
 });
 checkUpdate();
