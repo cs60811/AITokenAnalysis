@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -19,14 +20,35 @@ export const CLAUDE_PROJECTS_DIR =
 /**
  * The desktop app's local agent mode (the scheduled tasks configured in its UI)
  * writes transcripts here instead of CLAUDE_PROJECTS_DIR, and ccusage does not
- * read this root either — see localagent.js. Windows-only path; on a machine
- * without it, the feature simply reports nothing.
+ * read this root either — see localagent.js.
+ *
+ * Claude Desktop ships as an MSIX package (Program Files\WindowsApps), so its
+ * writes to %APPDATA%\claude are virtualised into the package's own container.
+ * The container path is the real storage and any process can read it. The
+ * %APPDATA%\claude view is NOT equivalent: measured on this machine, readdir
+ * there returns ENOENT at medium integrity but lists 49 entries from an elevated
+ * process. Reading %APPDATA% therefore made the whole feature silently empty for
+ * every normal user — and invisible to us, because the dev shell was elevated.
+ *
+ * Prefer the container; fall back to %APPDATA% for a non-packaged install.
  */
-export const LOCAL_AGENT_DIR = path.join(
-  process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'),
-  'claude',
-  'local-agent-mode-sessions',
-);
+function resolveLocalAgentDir() {
+  const leaf = ['claude', 'local-agent-mode-sessions'];
+  const local = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
+  const packages = path.join(local, 'Packages');
+  try {
+    for (const entry of fs.readdirSync(packages)) {
+      if (!entry.startsWith('Claude_')) continue;
+      const candidate = path.join(packages, entry, 'LocalCache', 'Roaming', ...leaf);
+      if (fs.existsSync(candidate)) return candidate;
+    }
+  } catch {
+    // no package container on this machine — fall through
+  }
+  return path.join(process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'), ...leaf);
+}
+
+export const LOCAL_AGENT_DIR = resolveLocalAgentDir();
 
 /** Overridable because ROOT is read-only inside a packaged Electron app (asar). */
 export const CACHE_DIR = process.env.AITA_CACHE_DIR || path.join(ROOT, '.cache');
