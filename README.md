@@ -111,6 +111,27 @@ cost = input  * input_cost_per_token
      + cache_read_input_tokens * cache_read_input_token_cost
 ```
 
+### fast 模式另有加價
+
+`/fast` 用的是同一個模型但收取加價，記錄檔以 `usage.speed === "fast"` 標記。
+LiteLLM 沒有 speed 這個維度、也沒有 `claude-opus-5-fast` 條目，因此這類訊息一度全部
+以標準費率計算，本機少算 **$33.04（全域總額的 2.06%）**。
+
+加價倍率改從 [models.dev](https://models.dev) 的 `experimental.modes.fast` 取得
+（ccusage 讀的也是這份，其識別條件 `provider.body.speed === "fast"` 正是記錄檔裡那個欄位），
+**只取比值**：絕對費率與 5m/1h 快取寫入切分仍以 LiteLLM 為準，因為 models.dev 沒有 1h 這個概念。
+實測 opus-4-8 與 opus-5 的 fast 在 input／output／快取讀／快取寫四項都是精確 2.00 倍。
+
+內部視為虛擬模型 `<模型>-fast`（與 ccusage 報的名稱一致），所以：
+
+- 逐模型與 ccusage 對得起來，不是「我們 1 列 vs ccusage 2 列」
+- 加價獨立成一列，不會被稀釋進母模型——fast 讓成本直接翻倍，這是該被看見的訊號
+- 快取寫入分析、改善建議的費率欄都跟著是加價後的數字，費率解釋得了金額
+
+倍率**按每個計價單元**解析而非每行：fast 訊息裡的 advisor 迭代自己沒有 `speed`，
+ccusage 也不對它加價。models.dev 短暫連不上時退回磁碟上的前次良好副本；
+真的查不到倍率就照標準費率計價（下限，不是 $0）並記錄下來，由 verify 直接失敗。
+
 ## 為什麼一律以「成本」排序，不以 token 數排序
 
 實測 **94.2% 的 token 是快取讀取**，但其費率僅約輸入的 1/10。
@@ -148,7 +169,8 @@ cost = input  * input_cost_per_token
 3. 語句分類器有效過濾噪音
 4. 三層成本切分（own / subagent / workflow）
 5. 未歸因成本 < 5%
-6. **全域對帳閘門**：本工具總額 vs `ccusage daily`，容差 1%（實測 0.00%，逐模型皆分毫不差）
+6. **fast 加價有被計價**：任何 `speed=fast` 的模型查不到倍率就失敗，不讓它靜默用半價
+7. **全域對帳閘門**：本工具總額 vs `ccusage daily`，容差 1%（實測 0.00%，逐模型皆分毫不差）
 
 > 曾有約 1% 的落差（ccusage 略高），後來擴大到 2% 以上，已找出並修正兩個各佔約 1% 的原因：
 > - **串流訊息的部分寫入**：同一則 assistant 訊息會以相同 `id|requestId` 反覆寫入記錄檔，
@@ -156,6 +178,9 @@ cost = input  * input_cost_per_token
 > - **advisor 層**：high effort 的回合會另外請 advisor 模型作答，該次請求記在
 >   `usage.iterations[]` 的 `advisor_message`，且**不含**在最外層 usage 內
 >   （本機 15030 筆帶 iterations 的記錄，最外層一律等於非 advisor iterations 之和）。
+>
+> 之後 fast 模式上線，同一個閘門再次紅燈（2.06%），成因與上述兩者無關，見「成本計算」的
+> fast 段落。三次都不是容差問題，容差始終維持 1%。
 >
 > 容差留 1% 是給快取時間差：儀表板拿即時解析結果比對最舊 5 分鐘的 ccusage 文件。
 

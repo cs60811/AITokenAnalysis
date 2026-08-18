@@ -50,6 +50,18 @@ function resolveLocalAgentDir() {
 
 export const LOCAL_AGENT_DIR = resolveLocalAgentDir();
 
+/**
+ * "This is the packaged desktop build."
+ *
+ * Deliberately NOT just `process.versions.electron`: the server runs in a child
+ * process now (electron/server-host.cjs), and what this flag gates — git
+ * self-update, POST /api/update, the update download URL — is about how the app
+ * was installed, not about which binary happens to be executing. electron/main.js
+ * sets AITA_DESKTOP=1 when it forks; the versions check stays so `electron .`
+ * against this repo still behaves as the desktop build.
+ */
+export const IS_DESKTOP = process.env.AITA_DESKTOP === '1' || Boolean(process.versions.electron);
+
 /** Overridable because ROOT is read-only inside a packaged Electron app (asar). */
 export const CACHE_DIR = process.env.AITA_CACHE_DIR || path.join(ROOT, '.cache');
 export const PARSED_CACHE_FILE = path.join(CACHE_DIR, 'parsed.json');
@@ -68,6 +80,16 @@ export const REPO_URL = 'https://github.com/cs60811/AITokenAnalysis';
 export const LITELLM_PRICES_URL =
   'https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json';
 export const LITELLM_TIMEOUT_MS = 5000;
+
+/**
+ * Second catalog, consulted only for fast-mode premiums.
+ *
+ * LiteLLM has no speed dimension, so it cannot price a `/fast` message at all.
+ * models.dev publishes it as `experimental.modes.fast` — the same source ccusage
+ * reads — and we take only the ratio from it, leaving LiteLLM authoritative for
+ * the absolute rates and the 5m/1h cache-write split.
+ */
+export const MODELSDEV_PRICES_URL = 'https://models.dev/api.json';
 
 /** Warn in the UI once the pricing snapshot is this old. */
 export const PRICES_STALE_DAYS = 30;
@@ -89,6 +111,13 @@ export const UNATTRIBUTED_TOLERANCE_PCT = 5;
 
 export const CCUSAGE_TIMEOUT_MS = 60_000;
 export const CCUSAGE_MAX_BUFFER = 1 << 28;
+
+/**
+ * The export is one `daily --breakdown` document — measured at 22 KB for a full
+ * year on this machine. It does not need the 256 MB ceiling the general path
+ * carries, and the export endpoint is the one a user can fire repeatedly.
+ */
+export const CCUSAGE_EXPORT_MAX_BUFFER = 1 << 24;
 
 /**
  * The ccusage cache is fingerprint-invalidated for Claude transcripts, but ccusage

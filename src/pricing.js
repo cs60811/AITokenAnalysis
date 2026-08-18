@@ -5,6 +5,7 @@ import {
   CACHE_DIR,
   LITELLM_PRICES_URL,
   LITELLM_TIMEOUT_MS,
+  MODELSDEV_PRICES_URL,
   PRICES_CACHE_FILE,
   PRICES_SNAPSHOT_FILE,
   PRICES_STALE_DAYS,
@@ -19,13 +20,44 @@ const RATE_FIELDS = [
   'cache_read_input_token_cost',
 ];
 
+/**
+ * Suffix marking the fast-mode variant of a model. Chosen to match the name
+ * `ccusage` reports (claude-opus-5-fast) so the two agree row for row.
+ */
+const FAST_SUFFIX = '-fast';
+
+/**
+ * The model a usage record actually bills as.
+ *
+ * Idempotent, because it is applied both when minting byModel keys and again
+ * inside costOf() on whatever key it is handed.
+ */
+export function billingModelOf(usage, model) {
+  if (!model || usage?.speed !== 'fast' || model.endsWith(FAST_SUFFIX)) return model;
+  return `${model}${FAST_SUFFIX}`;
+}
+
 let state = {
   rates: null,
+  /** model -> price multiplier for fast mode (see fetchFastMultipliers) */
+  fastMultipliers: null,
   /** 'litellm' | 'cache' | 'snapshot' */
   source: null,
   fetchedAt: null,
   error: null,
 };
+
+/**
+ * Models seen billing at speed=fast that we had no multiplier for.
+ *
+ * Never empty silently: such a message is charged at the standard rate, which
+ * under-reports by whatever the premium is (2x on every model that publishes
+ * one so far). verify() gates on this so a newly fast-capable model fails loudly
+ * instead of quietly cheapening the total.
+ */
+const unknownFast = new Set();
+export const unknownFastModels = () => [...unknownFast];
+export const resetUnknownFastModels = () => unknownFast.clear();
 
 function pickRates(raw) {
   const out = {};
@@ -53,8 +85,59 @@ async function fetchLiteLLM() {
   }
 }
 
+/**
+ * Fast-mode price multipliers, keyed by model.
+ *
+ * Claude Code's fast mode (`/fast`) bills the same model at a premium and marks
+ * every such message `usage.speed === "fast"`. LiteLLM does not model this at
+ * all — it has no `claude-opus-5-fast` entry and no speed dimension — so on this
+ * corpus 165 messages were billed at the standard rate and the global total came
+ * out 2.06% under `ccusage daily`.
+ *
+ * models.dev carries it as `experimental.modes.fast`, identified by exactly the
+ * field we read from the transcript (`provider.body.speed === "fast"`). We take
+ * only the ratio, not the absolute rates: LiteLLM is the authority on the 5m/1h
+ * cache-write split that models.dev has no concept of, and the premium is
+ * uniform across input/output/read/write on every model that publishes one
+ * (verified: opus-4-8 and opus-5 are 2.00x on all four).
+ */
+async function fetchFastMultipliers() {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), LITELLM_TIMEOUT_MS);
+  try {
+    const res = await fetch(MODELSDEV_PRICES_URL, { signal: ctrl.signal });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const doc = await res.json();
+    const out = {};
+    for (const provider of Object.values(doc)) {
+      for (const [id, m] of Object.entries(provider?.models ?? {})) {
+        const fast = m?.experimental?.modes?.fast?.cost;
+        const base = m?.cost;
+        if (!fast || !base?.input) continue;
+        out[id] = fast.input / base.input;
+      }
+    }
+    return out;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function readJson(file) {
   return JSON.parse(await fsp.readFile(file, 'utf8'));
+}
+
+/** Last good multipliers on disk, for when models.dev is briefly unreachable. */
+async function diskFastMultipliers() {
+  for (const file of [PRICES_CACHE_FILE, PRICES_SNAPSHOT_FILE]) {
+    try {
+      const doc = await readJson(file);
+      if (doc?.fastMultipliers && Object.keys(doc.fastMultipliers).length) return doc.fastMultipliers;
+    } catch {
+      // try the next file
+    }
+  }
+  return null;
 }
 
 /**
@@ -63,13 +146,34 @@ async function readJson(file) {
  * which the UI renders as "—" rather than a misleading $0.
  */
 export async function initPricing() {
+  resetUnknownFastModels();
+  scaledCache.clear();
+  // Independent of the rate fetch: a models.dev outage must not cost us LiteLLM
+  // rates, and vice versa. A missing multiplier surfaces through unknownFast.
+  let fastMultipliers = null;
+  try {
+    fastMultipliers = await fetchFastMultipliers();
+  } catch (err) {
+    state.error = `models.dev fetch failed: ${err.message}`;
+  }
+  // Observed in testing: one timed-out fetch and every fast message silently
+  // reverts to half price. The premium changes far more slowly than the catalog
+  // is fetched, so the last good copy is a much better answer than none.
+  fastMultipliers ??= await diskFastMultipliers();
+
   try {
     const rates = await fetchLiteLLM();
-    state = { rates, source: 'litellm', fetchedAt: new Date().toISOString(), error: null };
+    state = {
+      rates,
+      fastMultipliers,
+      source: 'litellm',
+      fetchedAt: new Date().toISOString(),
+      error: state.error,
+    };
     await fsp.mkdir(CACHE_DIR, { recursive: true });
     await fsp.writeFile(
       PRICES_CACHE_FILE,
-      JSON.stringify({ fetchedAt: state.fetchedAt, rates }, null, 2),
+      JSON.stringify({ fetchedAt: state.fetchedAt, rates, fastMultipliers }, null, 2),
     );
     return state;
   } catch (err) {
@@ -84,6 +188,8 @@ export async function initPricing() {
       const doc = await readJson(file);
       state = {
         rates: doc.rates ?? doc,
+        // A live models.dev still wins over a stale on-disk copy.
+        fastMultipliers: fastMultipliers ?? doc.fastMultipliers ?? null,
         source,
         fetchedAt: doc.fetchedAt ?? null,
         error: state.error,
@@ -107,16 +213,48 @@ export function pricingStatus() {
     ageDays: ageDays == null ? null : Number(ageDays.toFixed(1)),
     stale: ageDays != null && ageDays > PRICES_STALE_DAYS,
     modelCount: state.rates ? Object.keys(state.rates).length : 0,
+    fastModelCount: state.fastMultipliers ? Object.keys(state.fastMultipliers).length : 0,
+    unknownFastModels: unknownFastModels(),
     error: state.error,
   };
 }
 
+/**
+ * Fast mode is modelled as a virtual model `<base>-fast` — the name ccusage also
+ * reports. Its rates are the base sheet scaled by the published premium, so every
+ * consumer (cost, the 5m/1h cache-write split, the rate columns in the improvement
+ * tab) stays consistent without needing to know fast mode exists.
+ *
+ * With no published premium we bill the BASE rate rather than dropping the
+ * message: base is a floor, $0 would be a lie. The model is recorded so that
+ * verify fails loudly instead of the total quietly cheapening.
+ */
+const scaledCache = new Map();
+
 export function ratesFor(model) {
-  return state.rates?.[model] ?? null;
+  if (!model?.endsWith(FAST_SUFFIX)) return state.rates?.[model] ?? null;
+  if (scaledCache.has(model)) return scaledCache.get(model);
+
+  const bare = model.slice(0, -FAST_SUFFIX.length);
+  const base = state.rates?.[bare] ?? null;
+  if (!base) return null;
+
+  const mult = fastMultiplierFor(bare);
+  if (mult == null) unknownFast.add(bare);
+  const rec = {};
+  for (const [k, v] of Object.entries(base)) rec[k] = v * (mult ?? 1);
+  scaledCache.set(model, rec);
+  return rec;
 }
 
 export function hasRates(model) {
   return ratesFor(model) != null;
+}
+
+/** Price multiplier for one model in fast mode, or null when unpublished. */
+export function fastMultiplierFor(model) {
+  const m = state.fastMultipliers?.[model];
+  return typeof m === 'number' && m > 0 ? m : null;
 }
 
 /**
@@ -126,10 +264,18 @@ export function hasRates(model) {
  * ced37f19 (opus 85.52876450, sonnet 1.36267350). The 5m/1h cache-creation
  * split matters: a 1h write costs ~2x input, a 5m write ~1.25x.
  *
+ * `usage.speed === "fast"` resolves to the `<model>-fast` rate sheet, which
+ * already carries the premium — there is no multiplier here to forget. The key is
+ * resolved per billable part, not per transcript line, which is what keeps the
+ * advisor tier correct: an `advisor_message` iteration inside a fast message
+ * carries no `speed` of its own and ccusage does not charge it the premium either
+ * (measured: the one such iteration on this corpus is $0.85, an order of magnitude
+ * above the $0.08 residual the reconciliation lands on).
+ *
  * Returns null for an unpriced model so callers can render "—" instead of $0.
  */
 export function costOf(usage, model) {
-  const p = ratesFor(model);
+  const p = ratesFor(billingModelOf(usage, model));
   if (!p || !usage) return null;
   const cc = usage.cache_creation ?? {};
   const write5m = cc.ephemeral_5m_input_tokens ?? 0;
@@ -157,9 +303,13 @@ export function costOf(usage, model) {
  * under-reported our total by 1.03%, all of it opus.
  */
 export function billableParts(usage, model) {
-  const parts = [{ model, usage }];
+  const parts = [{ model: billingModelOf(usage, model), usage }];
   for (const it of usage?.iterations ?? []) {
-    if (it?.type === 'advisor_message') parts.push({ model: it.model ?? model, usage: it });
+    // Per part, not per line: an advisor iteration inside a fast message carries
+    // no speed of its own, and ccusage does not charge it the premium either.
+    if (it?.type === 'advisor_message') {
+      parts.push({ model: billingModelOf(it, it.model ?? model), usage: it });
+    }
   }
   return parts;
 }
@@ -180,10 +330,16 @@ export function tokensOf(usage) {
 export async function writeSnapshot(models) {
   if (!state.rates) throw new Error('no rates loaded');
   const rates = {};
-  for (const m of models) {
+  const fastMultipliers = {};
+  for (const model of models) {
+    // byModel now yields fast keys too; the snapshot stores the real model plus
+    // its premium, and ratesFor() reconstitutes the variant from those two.
+    const m = model.endsWith(FAST_SUFFIX) ? model.slice(0, -FAST_SUFFIX.length) : model;
     if (state.rates[m]) rates[m] = state.rates[m];
+    // Ship the premium too, or the offline desktop build under-reports fast mode.
+    if (state.fastMultipliers?.[m]) fastMultipliers[m] = state.fastMultipliers[m];
   }
-  const doc = { fetchedAt: state.fetchedAt ?? new Date().toISOString(), rates };
+  const doc = { fetchedAt: state.fetchedAt ?? new Date().toISOString(), rates, fastMultipliers };
   await fsp.writeFile(PRICES_SNAPSHOT_FILE, JSON.stringify(doc, null, 2));
   return Object.keys(rates).length;
 }
@@ -191,8 +347,14 @@ export async function writeSnapshot(models) {
 /** Load a snapshot synchronously — used by unit tests that skip initPricing(). */
 export function loadSnapshotSync() {
   const doc = JSON.parse(fs.readFileSync(PRICES_SNAPSHOT_FILE, 'utf8'));
-  state = { rates: doc.rates ?? doc, source: 'snapshot', fetchedAt: doc.fetchedAt ?? null, error: null };
+  state = {
+    rates: doc.rates ?? doc,
+    fastMultipliers: doc.fastMultipliers ?? null,
+    source: 'snapshot',
+    fetchedAt: doc.fetchedAt ?? null,
+    error: null,
+  };
   return state;
 }
 
-export const _internal = { pickRates, RATE_FIELDS, path };
+export const _internal = { pickRates, RATE_FIELDS, path, fetchFastMultipliers, FAST_SUFFIX };

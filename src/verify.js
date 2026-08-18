@@ -8,7 +8,7 @@
 import { analyzeAll, analyzeSession } from './attribute.js';
 import { discoverSessions } from './discover.js';
 import { dedupKey, isBillable, isRealPrompt, readLines } from './parser.js';
-import { costOf, initPricing, pricingStatus } from './pricing.js';
+import { costOf, initPricing, pricingStatus, unknownFastModels } from './pricing.js';
 import * as ccusage from './ccusage.js';
 import { modelTotalsFromDaily } from './ccusage.js';
 import { RECONCILE_TOLERANCE_PCT, UNATTRIBUTED_TOLERANCE_PCT } from './config.js';
@@ -79,15 +79,22 @@ async function main() {
   check(real > 0 && real < strUser, 'classifier drops machine-generated prompts', `${real}/${strUser} kept (${(100 - (real / strUser) * 100).toFixed(0)}% noise)`);
 
   console.log('\n5. Tier split on the anchor session');
-  const a = analyzeSession(anchor);
-  // Re-baselined when streamed messages started being counted at their final
-  // usage: the anchor's agent files hold partial writes, so subagent (+$0.04)
-  // and workflow (+$3.51) both grew. ownCost is unchanged — this June session
-  // predates the advisor tier and its main transcript has no partial writes.
-  check(near(a.ownCost, 86.89144, 0.01), 'ownCost = 86.89 (main only)', `$${a.ownCost.toFixed(5)}`);
-  check(near(a.ccusageCost, 87.44705, 0.01), 'ccusageCost = 87.45 (main + subagents)', `$${a.ccusageCost.toFixed(5)}`);
-  check(near(a.trueCost, 116.16848, 0.01), 'trueCost = 116.17 (incl. workflow)', `$${a.trueCost.toFixed(5)}`);
-  check(a.workflowCost > 25, 'workflow tier carries the hidden spend', `$${a.workflowCost.toFixed(5)} (${((a.workflowCost / a.trueCost) * 100).toFixed(0)}% of session)`);
+  // Claude Code prunes ~/.claude/projects on a retention schedule, so a session
+  // pinned by UUID eventually disappears and every check reading it becomes
+  // unrunnable. Skip rather than crash — check 2 already reported the absence.
+  if (!anchor?.main) {
+    console.log('  SKIP  anchor session no longer on disk (retention); see check 2');
+  } else {
+    const a = analyzeSession(anchor);
+    // Re-baselined when streamed messages started being counted at their final
+    // usage: the anchor's agent files hold partial writes, so subagent (+$0.04)
+    // and workflow (+$3.51) both grew. ownCost is unchanged — this June session
+    // predates the advisor tier and its main transcript has no partial writes.
+    check(near(a.ownCost, 86.89144, 0.01), 'ownCost = 86.89 (main only)', `$${a.ownCost.toFixed(5)}`);
+    check(near(a.ccusageCost, 87.44705, 0.01), 'ccusageCost = 87.45 (main + subagents)', `$${a.ccusageCost.toFixed(5)}`);
+    check(near(a.trueCost, 116.16848, 0.01), 'trueCost = 116.17 (incl. workflow)', `$${a.trueCost.toFixed(5)}`);
+    check(a.workflowCost > 25, 'workflow tier carries the hidden spend', `$${a.workflowCost.toFixed(5)} (${((a.workflowCost / a.trueCost) * 100).toFixed(0)}% of session)`);
+  }
 
   const all = analyzeAll(sessions);
 
@@ -101,7 +108,14 @@ async function main() {
   const unPct = total ? (un / total) * 100 : 0;
   check(unPct < UNATTRIBUTED_TOLERANCE_PCT, `unattributed < ${UNATTRIBUTED_TOLERANCE_PCT}%`, `${unPct.toFixed(2)}% ($${un.toFixed(2)})`);
 
-  console.log('\n7. Global reconciliation vs live ccusage  [GATE]');
+  console.log('\n7. Fast-mode premium is priced');
+  // A speed=fast message billed at the standard rate under-reports silently.
+  // costOf() records any such model; an empty set is the only healthy state.
+  // Left unguarded this cost 2.06% of the global total (165 messages, $33.04).
+  const gaps = unknownFastModels();
+  check(gaps.length === 0, 'every speed=fast model has a published premium', gaps.length ? `MISSING: ${gaps.join(', ')}` : `${ps.fastModelCount} models carry a premium`);
+
+  console.log('\n8. Global reconciliation vs live ccusage  [GATE]');
   try {
     // Snapshot ccusage fresh each run: totals drift as new usage lands.
     const totals = modelTotalsFromDaily(await ccusage.daily());
