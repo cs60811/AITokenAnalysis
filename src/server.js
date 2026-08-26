@@ -19,7 +19,7 @@ import { getAnalysis, invalidate } from './cache.js';
 import { localAgentDetail, localAgentSpend } from './localagent.js';
 import { applyUpdate, checkForUpdate, scheduleRestart } from './update.js';
 import { initPricing, pricingStatus } from './pricing.js';
-import { CLAUDE_PROJECTS_DIR, HOST, PORT, RECONCILE_TOLERANCE_PCT, ROOT } from './config.js';
+import { CLAUDE_PROJECTS_DIR, HOST, IS_DESKTOP, PORT, RECONCILE_TOLERANCE_PCT, ROOT } from './config.js';
 
 const app = express();
 app.disable('x-powered-by');
@@ -215,7 +215,7 @@ app.get('/api/update-check', asJson((req) => checkForUpdate({ force: req.query.f
 /** One-click update: ff-only pull, then self-restart (npm install + npm start). */
 app.post('/api/update', async (req, res) => {
   // The packaged desktop app can't git-pull or npm-restart itself.
-  if (process.versions.electron) {
+  if (IS_DESKTOP) {
     return res.status(501).json({ error: '桌面版請至 GitHub Releases 下載新版', kind: 'unsupported' });
   }
   try {

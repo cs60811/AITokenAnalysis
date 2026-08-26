@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import { createRequire } from 'node:module';
 import fs from 'node:fs';
 import path from 'node:path';
-import { CCUSAGE_MAX_BUFFER, CCUSAGE_TIMEOUT_MS } from './config.js';
+import { CCUSAGE_MAX_BUFFER, CCUSAGE_TIMEOUT_MS, IS_DESKTOP } from './config.js';
 
 const require = createRequire(import.meta.url);
 
@@ -142,7 +142,9 @@ async function invoke(args) {
     );
   }
   // Under Electron process.execPath is electron.exe — make it behave as node.
-  const env = process.versions.electron
+  // IS_DESKTOP covers the server-host child process, where execPath is still
+  // electron.exe even though this code no longer runs in the main process.
+  const env = process.versions.electron || IS_DESKTOP
     ? { ...process.env, ELECTRON_RUN_AS_NODE: '1' }
     : undefined;
   return run(process.execPath, [cliPath, ...args], env);
