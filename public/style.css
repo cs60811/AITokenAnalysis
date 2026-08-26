@@ -335,6 +335,12 @@ table { width: 100%; border-collapse: collapse; font-size: 13px; }
 th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
 th { color: var(--text-muted); font-weight: 600; font-size: 12px; }
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+th.sortable { cursor: pointer; user-select: none; }
+th.sortable:hover, th.sortable:focus-visible { color: var(--text-primary); }
+th.sorted { color: var(--text-primary); }
+/* Reserve the arrow's width unconditionally so cycling a column doesn't reflow the row. */
+th.sortable .sort-ind { display: inline-block; width: 1em; margin-left: 4px; font-size: 9px; }
+th.sortable .sort-rank { font-size: 9px; font-weight: 700; color: var(--series-1); }
 tbody tr.clickable { cursor: pointer; }
 tbody tr.clickable:hover { background: var(--surface-0); }
 td.snippet {

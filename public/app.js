@@ -900,24 +900,89 @@ async function showPrompt(id) {
 }
 
 /* ============================== TAB 3 ============================== */
-function drawSessions() {
+
+/* Multi-column sort for the session table. Each header click cycles that column
+   asc -> desc -> off; a column already in the list toggles in place and keeps its
+   priority, a new one is appended at the end. An empty list means "server order"
+   (trueCost desc) — which is what the third click restores. The list is persisted,
+   so the next visit opens with the same ordering. */
+const SESSION_SORT_KEY = 'sessions-sort';
+const SESSION_SORTS = {
+  projectLabel: { cmp: (a, b) => String(a.projectLabel ?? '').localeCompare(String(b.projectLabel ?? ''), 'zh-TW') },
+  lastActivity: { cmp: (a, b) => (Date.parse(a.lastActivity) || 0) - (Date.parse(b.lastActivity) || 0) },
+  promptCount: { cmp: (a, b) => (a.promptCount ?? 0) - (b.promptCount ?? 0) },
+  trueCost: { cmp: (a, b) => (a.trueCost ?? 0) - (b.trueCost ?? 0) },
+};
+
+/* A stale or hand-edited stored value must not take the whole tab down with it. */
+function loadSessionSort() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(SESSION_SORT_KEY) ?? '[]');
+    if (!Array.isArray(raw)) return [];
+    const seen = new Set();
+    const out = [];
+    for (const e of raw) {
+      if (!e || !SESSION_SORTS[e.key] || (e.dir !== 'asc' && e.dir !== 'desc') || seen.has(e.key)) continue;
+      seen.add(e.key);
+      out.push({ key: e.key, dir: e.dir });
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+let sessionSort = loadSessionSort();
+
+function cycleSessionSort(key) {
+  if (!SESSION_SORTS[key]) return;
+  const i = sessionSort.findIndex((e) => e.key === key);
+  if (i < 0) sessionSort.push({ key, dir: 'asc' });
+  else if (sessionSort[i].dir === 'asc') sessionSort[i] = { key, dir: 'desc' };
+  else sessionSort.splice(i, 1);
+  try {
+    localStorage.setItem(SESSION_SORT_KEY, JSON.stringify(sessionSort));
+  } catch { /* private mode / quota: sorting still works for this visit */ }
+  renderSessionsTable();
+}
+
+/* Sorts a copy — state.sessions.sessions stays in server order, which the overview
+   tab and the "cancel sort" state both read. Array.prototype.sort is stable, so ties
+   under the active keys fall back to that server order with no explicit tiebreak. */
+function sortedSessions(sessions) {
+  if (!sessionSort.length) return sessions;
+  return [...sessions].sort((a, b) => {
+    for (const { key, dir } of sessionSort) {
+      const v = SESSION_SORTS[key].cmp(a, b);
+      if (v) return dir === 'asc' ? v : -v;
+    }
+    return 0;
+  });
+}
+
+function sortableTh(key, label, cls = '') {
+  const i = sessionSort.findIndex((e) => e.key === key);
+  const active = i >= 0 ? sessionSort[i] : null;
+  const aria = active ? (active.dir === 'asc' ? 'ascending' : 'descending') : 'none';
+  const arrow = active ? (active.dir === 'asc' ? '▲' : '▼') : '';
+  // Priority index only earns its space once there is more than one key to order.
+  const rank = active && sessionSort.length > 1 ? `<sup class="sort-rank">${i + 1}</sup>` : '';
+  return `<th class="sortable${active ? ' sorted' : ''}${cls ? ` ${cls}` : ''}" data-sort="${key}" role="button" tabindex="0" aria-sort="${aria}" title="點擊排序：升冪 → 降冪 → 取消">${escapeHtml(label)}<span class="sort-ind">${arrow}</span>${rank}</th>`;
+}
+
+/* Split out of drawSessions() so a header click re-renders only the table and
+   leaves the project chart alone. */
+function renderSessionsTable() {
   const d = state.sessions;
   if (!d) return;
-  const t = d.totals;
-  const pct = t.ccusageCost ? (t.workflowCost / t.ccusageCost) * 100 : 0;
-
-  $('#hidden-summary').innerHTML = `
-    <div>ccusage session 合計<strong>${usd(t.ccusageCost)}</strong></div>
-    <div class="accent">被漏算的 workflow<strong>${usd(t.workflowCost)}</strong></div>
-    <div>實際合計<strong>${usd(t.trueCost)}</strong></div>
-    <div>低估比例<strong>${pct.toFixed(1)}%</strong></div>`;
+  const rows = sortedSessions(d.sessions);
 
   $('#table-sessions').innerHTML = `
     <thead><tr>
-      <th class="num">#</th><th>專案</th><th>Session</th><th>最後活動</th><th class="num">語句</th>
-      <th class="num">ccusage 數字</th><th class="num">實際成本</th><th class="num">差額</th>
+      <th class="num">#</th>${sortableTh('projectLabel', '專案')}<th>Session</th>${sortableTh('lastActivity', '最後活動')}${sortableTh('promptCount', '語句', 'num')}
+      <th class="num">ccusage 數字</th>${sortableTh('trueCost', '實際成本', 'num')}<th class="num">差額</th>
     </tr></thead>
-    <tbody>${d.sessions.map((s, i) => `
+    <tbody>${rows.map((s, i) => `
       <tr class="clickable" data-session="${s.sessionId}">
         <td class="num rank">${i + 1}</td>
         <td>${escapeHtml(s.projectLabel ?? '—')}</td>
@@ -933,6 +998,30 @@ function drawSessions() {
   document.querySelectorAll('#table-sessions tr[data-session]').forEach((tr) => {
     tr.addEventListener('click', () => showSession(tr.dataset.session));
   });
+  document.querySelectorAll('#table-sessions th.sortable').forEach((th) => {
+    th.addEventListener('click', () => cycleSessionSort(th.dataset.sort));
+    th.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        cycleSessionSort(th.dataset.sort);
+      }
+    });
+  });
+}
+
+function drawSessions() {
+  const d = state.sessions;
+  if (!d) return;
+  const t = d.totals;
+  const pct = t.ccusageCost ? (t.workflowCost / t.ccusageCost) * 100 : 0;
+
+  $('#hidden-summary').innerHTML = `
+    <div>ccusage session 合計<strong>${usd(t.ccusageCost)}</strong></div>
+    <div class="accent">被漏算的 workflow<strong>${usd(t.workflowCost)}</strong></div>
+    <div>實際合計<strong>${usd(t.trueCost)}</strong></div>
+    <div>低估比例<strong>${pct.toFixed(1)}%</strong></div>`;
+
+  renderSessionsTable();
 
   const projects = state.projects?.projects ?? [];
   render('chart-projects', {
