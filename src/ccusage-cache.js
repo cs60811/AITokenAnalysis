@@ -47,9 +47,18 @@ export function invalidateCcusage() {
 }
 
 let versionPromise = null;
-/** ccusage's version can't change while we're running — ask once per process. */
+/**
+ * ccusage's version can't change while we're running — ask once per process.
+ *
+ * Successes are memoized forever; failures are not. One hiccup at startup used to
+ * pin the health card to "unavailable" until the app was restarted, because the
+ * failure was baked into this promise (and version() hid it inside a string).
+ */
 export function cachedVersion() {
-  versionPromise ??= ccusageVersion();
+  versionPromise ??= ccusageVersion().catch((err) => {
+    versionPromise = null; // let the next request try again
+    return `unavailable (${err?.kind ?? 'error'})`;
+  });
   return versionPromise;
 }
 

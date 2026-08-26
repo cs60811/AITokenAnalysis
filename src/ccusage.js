@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import { createRequire } from 'node:module';
 import fs from 'node:fs';
 import path from 'node:path';
-import { CCUSAGE_MAX_BUFFER, CCUSAGE_TIMEOUT_MS, IS_DESKTOP } from './config.js';
+import { CCUSAGE_EXPORT_MAX_BUFFER, CCUSAGE_MAX_BUFFER, CCUSAGE_TIMEOUT_MS, IS_DESKTOP } from './config.js';
 
 const require = createRequire(import.meta.url);
 
@@ -101,7 +101,7 @@ export class CcusageError extends Error {
   }
 }
 
-function run(cmd, args, env) {
+function run(cmd, args, { env, maxBuffer = CCUSAGE_MAX_BUFFER } = {}) {
   return new Promise((resolve, reject) => {
     execFile(
       cmd,
@@ -109,7 +109,7 @@ function run(cmd, args, env) {
       {
         shell: false,
         timeout: CCUSAGE_TIMEOUT_MS,
-        maxBuffer: CCUSAGE_MAX_BUFFER,
+        maxBuffer,
         windowsHide: true,
         env: env ?? process.env,
       },
@@ -130,9 +130,9 @@ function run(cmd, args, env) {
 let exePath;
 let cliPath;
 
-async function invoke(args) {
+async function invoke(args, { maxBuffer } = {}) {
   if (exePath === undefined) exePath = findNativeExe();
-  if (exePath) return run(exePath, args);
+  if (exePath) return run(exePath, args, { maxBuffer });
 
   if (cliPath === undefined) cliPath = findCli();
   if (!cliPath) {
@@ -147,7 +147,7 @@ async function invoke(args) {
   const env = process.versions.electron || IS_DESKTOP
     ? { ...process.env, ELECTRON_RUN_AS_NODE: '1' }
     : undefined;
-  return run(process.execPath, [cliPath, ...args], env);
+  return run(process.execPath, [cliPath, ...args], { env, maxBuffer });
 }
 
 export function cliLocation() {
@@ -181,16 +181,31 @@ export const sessions = (o) => json(['session', ...opts(o)]);
 /**
  * Raw stdout of `ccusage claude daily --mode calculate --breakdown --json`,
  * kept as a string so the export download is byte-for-byte what ccusage emitted.
+ *
+ * Deduped per range: this sits behind a download button, and every click used to
+ * spawn its own ccusage process re-parsing the whole corpus.
  */
-export const exportClaudeDaily = (o) =>
-  invoke(['claude', 'daily', ...opts(o), '--mode', 'calculate', '--breakdown', '--json']);
+const exportInflight = new Map();
 
+export function exportClaudeDaily(o = {}) {
+  const args = ['claude', 'daily', ...opts(o), '--mode', 'calculate', '--breakdown', '--json'];
+  const key = JSON.stringify(args);
+  const running = exportInflight.get(key);
+  if (running) return running;
+
+  const p = invoke(args, { maxBuffer: CCUSAGE_EXPORT_MAX_BUFFER })
+    .finally(() => exportInflight.delete(key));
+  exportInflight.set(key, p);
+  return p;
+}
+
+/**
+ * Throws on failure — the caller decides what a failure means. It used to return
+ * the string `unavailable (kind)`, which made a failure indistinguishable from a
+ * version number to cachedVersion() and got memoized for the whole process.
+ */
 export async function version() {
-  try {
-    return (await invoke(['--version'])).trim();
-  } catch (err) {
-    return `unavailable (${err.kind})`;
-  }
+  return (await invoke(['--version'])).trim();
 }
 
 /** Flatten `daily` into per-model totals, split claude vs other agents. */

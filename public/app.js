@@ -26,8 +26,22 @@ function colorForModel(model) {
   return css(modelColors.get(model));
 }
 
+/**
+ * Above the server's own worst case on purpose: /api/overview waits on ccusage,
+ * whose child-process timeout is 60s by itself, and on a firewalled network that
+ * is a slow-but-succeeding request (ccusage always fetches remote pricing). A 60s
+ * ceiling here would abort it into a visible error just before it returned.
+ */
+const API_TIMEOUT_MS = 90_000;
+
 const api = async (path, opts) => {
-  const res = await fetch(path, opts);
+  let res;
+  try {
+    res = await fetch(path, { signal: AbortSignal.timeout(API_TIMEOUT_MS), ...opts });
+  } catch (err) {
+    if (err.name === 'TimeoutError') throw new Error(`請求逾時（${API_TIMEOUT_MS / 1000} 秒）：${path}`);
+    throw err;
+  }
   const body = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
   if (!res.ok) throw Object.assign(new Error(body.error || `HTTP ${res.status}`), body);
   return body;
@@ -1287,6 +1301,21 @@ function clearBootSkeleton() {
   $('#boot-note')?.remove();
 }
 
+/**
+ * A load that failed has to say so. On boot there is nothing on screen yet, so
+ * the skeleton is torn down too; on a refresh the previous numbers stay put with
+ * the banner above them. The next successful load overwrites it via drawHealth().
+ */
+function showLoadError(err, { boot = false } = {}) {
+  $('#banner').className = 'banner error';
+  $('#banner').textContent = `${boot ? '載入失敗' : '重新整理失敗'}：${err.message}`;
+  $('#banner').hidden = false;
+  if (boot) {
+    clearBootSkeleton();
+    $('#kpi-overview').innerHTML = '';
+  }
+}
+
 async function withBusy(fn) {
   setBusy(true);
   try {
@@ -1464,14 +1493,25 @@ $('#export').addEventListener('click', () => {
 });
 
 $('#refresh').addEventListener('click', async (e) => {
-  e.target.disabled = true;
-  e.target.textContent = '重新整理中…';
+  const btn = e.target;
+  btn.disabled = true;
+  btn.textContent = '重新整理中…';
   try {
-    await api('/api/refresh', { method: 'POST' });
-    await loadAll();
+    // withBusy covers the POST too: dropping the caches is the slowest part of
+    // the round trip, and it used to run with no progress bar and no dimming —
+    // the button label was the only sign anything was happening.
+    // fetchAll rather than loadAll, so setBusy is not counted twice.
+    await withBusy(async () => {
+      await api('/api/refresh', { method: 'POST' });
+      await fetchAll();
+    });
+  } catch (err) {
+    // Without this the rejection was swallowed and the page quietly kept showing
+    // stale numbers as if the refresh had worked.
+    showLoadError(err);
   } finally {
-    e.target.disabled = false;
-    e.target.textContent = '重新整理';
+    btn.disabled = false;
+    btn.textContent = '重新整理';
   }
 });
 
@@ -1524,12 +1564,5 @@ document.addEventListener('keydown', (e) => {
 applyFontScale();
 
 applyPreset(); // default: 近 1 個月
-loadAll().catch((err) => {
-  $('#banner').className = 'banner error';
-  $('#banner').textContent = `載入失敗：${err.message}`;
-  $('#banner').hidden = false;
-  // Otherwise the skeleton keeps claiming it is still analysing.
-  clearBootSkeleton();
-  $('#kpi-overview').innerHTML = '';
-});
+loadAll().catch((err) => showLoadError(err, { boot: true }));
 checkUpdate();
