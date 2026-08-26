@@ -1,6 +1,6 @@
 {
   "name": "ai-token-analysis",
-  "version": "1.3.3",
+  "version": "1.3.4",
   "private": true,
   "description": "Local dashboard for Claude Code / Codex / Gemini token usage and cost, with per-prompt attribution",
   "author": "SKH",
