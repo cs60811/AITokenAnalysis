@@ -92,19 +92,24 @@ export function firstTimestamp(file) {
  * would be worse — a file briefly locked while Claude Code writes it would take
  * the whole dashboard down — so the read still degrades to "no lines", but it
  * is now counted and surfaced in /api/health.
+ *
+ * This is the collector for the ~/.claude/projects corpus only. Other callers
+ * (localagent.js) pass their own via readLines' second argument: they scan a
+ * different root on a different schedule, and their failures used to land here
+ * and get reported as a transcript-scan failure on the health card.
  */
 let readErrors = [];
 export const getReadErrors = () => readErrors;
 export const resetReadErrors = () => { readErrors = []; };
 
-export function readLines(file) {
+export function readLines(file, errors = readErrors) {
   const out = [];
   let raw;
   try {
     raw = fs.readFileSync(file, 'utf8');
   } catch (err) {
     // ENOENT is routine: a session can be deleted between the scan and the read.
-    if (err.code !== 'ENOENT') readErrors.push({ file, code: err.code ?? 'unknown' });
+    if (err.code !== 'ENOENT') errors.push({ file, code: err.code ?? 'unknown' });
     return out;
   }
   for (const line of raw.split('\n')) {

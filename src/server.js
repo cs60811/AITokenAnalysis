@@ -15,11 +15,11 @@ import {
 } from './aggregate.js';
 import * as ccusage from './ccusage.js';
 import { cachedVersion, filterDaily, fullDaily, invalidateCcusage, monthlyFromDaily } from './ccusage-cache.js';
-import { getAnalysis, invalidate } from './cache.js';
+import { cacheStats, getAnalysis, invalidate } from './cache.js';
 import { localAgentDetail, localAgentSpend } from './localagent.js';
 import { applyUpdate, checkForUpdate, scheduleRestart } from './update.js';
 import { initPricing, pricingStatus } from './pricing.js';
-import { CLAUDE_PROJECTS_DIR, HOST, PORT, RECONCILE_TOLERANCE_PCT, ROOT } from './config.js';
+import { CLAUDE_PROJECTS_DIR, HOST, IS_DESKTOP, PORT, RECONCILE_TOLERANCE_PCT, ROOT } from './config.js';
 
 const app = express();
 app.disable('x-powered-by');
@@ -194,6 +194,10 @@ app.get(
         cached: analysis.cached,
         dataDir: CLAUDE_PROJECTS_DIR,
         readErrors: analysis.readErrors ?? [],
+        // Since the last 重新整理. Both should read 1 for a whole refresh cycle:
+        // the nine parallel tab requests share one scan, so only one of them
+        // parses. See the scan cache in cache.js.
+        ...cacheStats(),
       },
       unattributed: { cost: un, pct: ours ? (un / ours) * 100 : 0 },
       reconcile,
@@ -201,12 +205,21 @@ app.get(
   }),
 );
 
+/**
+ * Drop the caches and return. Deliberately does NOT re-analyse: the client
+ * immediately fetches every tab endpoint, and the first of those does the parse
+ * while the rest share it via the scan cache (cache.js). Parsing here as well
+ * made it TWO full passes — this one, and another for the burst, because the
+ * ~1.4s parse outlives the scan TTL and a live session's fingerprint moves.
+ *
+ * Nothing reads the response body (app.js awaits and discards it); the footer's
+ * parseMs comes from /api/health, which is part of that same burst.
+ */
 app.post('/api/refresh', asJson(() => {
   invalidate();
   invalidateCcusage();
   fullDaily().catch(() => {}); // start the ccusage re-run now so the reload piggybacks on it
-  const a = getAnalysis();
-  return { ok: true, parseMs: a.parseMs, generatedAt: a.generatedAt };
+  return { ok: true };
 }));
 
 /** Update check: is the tracked upstream ahead of us? Cached 30 min server-side. */
@@ -215,7 +228,7 @@ app.get('/api/update-check', asJson((req) => checkForUpdate({ force: req.query.f
 /** One-click update: ff-only pull, then self-restart (npm install + npm start). */
 app.post('/api/update', async (req, res) => {
   // The packaged desktop app can't git-pull or npm-restart itself.
-  if (process.versions.electron) {
+  if (IS_DESKTOP) {
     return res.status(501).json({ error: '桌面版請至 GitHub Releases 下載新版', kind: 'unsupported' });
   }
   try {

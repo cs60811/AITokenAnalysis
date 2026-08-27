@@ -1,7 +1,7 @@
 import { execFile, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import { REPO_URL, ROOT } from './config.js';
+import { IS_DESKTOP, REPO_URL, ROOT } from './config.js';
 
 /**
  * Self-update, two modes:
@@ -17,9 +17,6 @@ const RAW_PKG_URL = `${REPO_URL.replace('https://github.com/', 'https://raw.gith
 const ZIP_URL = `${REPO_URL}/archive/refs/heads/master.zip`;
 const RELEASES_URL = `${REPO_URL}/releases/latest`;
 const ZIP_FETCH_TIMEOUT_MS = 10_000;
-
-/** Desktop build: git/npm self-update don't apply; new versions come from Releases. */
-const IS_ELECTRON = Boolean(process.versions.electron);
 
 const GIT_TIMEOUT_MS = 15_000;
 
@@ -53,9 +50,9 @@ export async function checkForUpdate({ force = false } = {}) {
 
   // null = not a git checkout at all -> fall back to the zip version check.
   // A git checkout without upstream (dev branches) stays silent on purpose.
-  // Electron always version-checks: `electron .` in the repo would otherwise
-  // see .git and offer the one-click update the desktop build disables.
-  const result = (IS_ELECTRON ? null : await gitCheck()) ?? (await zipCheck());
+  // The desktop build always version-checks: `electron .` in the repo would
+  // otherwise see .git and offer the one-click update the desktop build disables.
+  const result = (IS_DESKTOP ? null : await gitCheck()) ?? (await zipCheck());
   result.checkedAt = new Date().toISOString();
   cache = { at: Date.now(), result };
   return result;
@@ -121,7 +118,7 @@ async function zipCheck() {
       behind: newerVersion(remote, local) ? 1 : 0,
       current: { version: local },
       latest: { version: remote },
-      downloadUrl: IS_ELECTRON ? RELEASES_URL : ZIP_URL,
+      downloadUrl: IS_DESKTOP ? RELEASES_URL : ZIP_URL,
     };
   } catch (err) {
     return { supported: false, reason: `版本檢查失敗：${err.message}` };

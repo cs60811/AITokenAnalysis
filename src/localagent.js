@@ -72,13 +72,18 @@ const dirsIn = (dir) => {
  * have. `rootEntries: 0` means the root is not there (or not readable as a
  * directory); `files: 32, filesRead: 0` means we found the transcripts and
  * could not open them — two completely different problems, one glance apart.
+ *
+ * `readErrors` is our own collector, kept out of parser.js's module-level one:
+ * that array belongs to the transcript analysis and gets memoized into it, so a
+ * failure here used to surface on the health card as if ~/.claude/projects had
+ * failed to read.
  */
-let lastScan = { rootEntries: 0, files: 0, filesRead: 0, billableLines: 0 };
+let lastScan = { rootEntries: 0, files: 0, filesRead: 0, billableLines: 0, readErrors: [] };
 
 function transcriptFiles() {
   const out = [];
   const roots = dirsIn(LOCAL_AGENT_DIR);
-  lastScan = { rootEntries: roots.length, files: 0, filesRead: 0, billableLines: 0 };
+  lastScan = { rootEntries: roots.length, files: 0, filesRead: 0, billableLines: 0, readErrors: [] };
   for (const workspace of roots) {
     for (const conversation of dirsIn(workspace)) {
       for (const run of dirsIn(conversation)) {
@@ -130,6 +135,7 @@ function parseRuns() {
     // perfectly healthy memo hit reports "files found, none read".
     lastScan.filesRead = memo.scan.filesRead;
     lastScan.billableLines = memo.scan.billableLines;
+    lastScan.readErrors = memo.scan.readErrors;
     return memo.runs;
   }
 
@@ -137,7 +143,7 @@ function parseRuns() {
   const meta = new Map(); // run -> { task, prompt, models }
   for (const file of files) {
     const run = runOf(file);
-    const lines = readLines(file);
+    const lines = readLines(file, lastScan.readErrors);
     if (lines.length) lastScan.filesRead++;
     for (const line of lines) {
       const info = meta.get(run) ?? { task: null, prompt: null, models: new Set() };
@@ -193,17 +199,18 @@ function parseRuns() {
       };
     })
     .sort((a, z) => String(a.firstTs).localeCompare(String(z.firstTs)));
-  memo = { fp, runs: list, scan: { filesRead: lastScan.filesRead, billableLines: lastScan.billableLines } };
+  memo = {
+    fp,
+    runs: list,
+    scan: {
+      filesRead: lastScan.filesRead,
+      billableLines: lastScan.billableLines,
+      readErrors: lastScan.readErrors,
+    },
+  };
   return list;
 }
 
-/**
- * Range-filtered rollup for the overview card. `available` is false when this
- * machine has no local-agent transcripts at all, so the UI can drop the card
- * rather than show a permanent $0.00 — but a read failure must NOT look like
- * that, or the card vanishes and takes the explanation with it. It surfaces as
- * `error` instead, and nothing is cached, so the next request retries.
- */
 /**
  * Per-run detail for the local agent tab, grouped by scheduled task.
  *
@@ -212,10 +219,22 @@ function parseRuns() {
  * question here — these runs fire unattended and nobody is watching them.
  */
 export function localAgentDetail({ since, until } = {}) {
-  const base = localAgentSpend({ since, until });
-  if (!base.available || base.error) return { ...base, runs: [], byTask: [] };
+  // One parseRuns() for both halves, and inside the guard. It used to run twice —
+  // once via localAgentSpend() and once below, the second outside any try/catch —
+  // so a directory disappearing between the two turned a reportable
+  // { available: false, error } payload into an unhandled 500 (dirsIn rethrows
+  // anything that is not ENOENT).
+  let all;
+  try {
+    all = parseRuns();
+  } catch (err) {
+    return { ...spendError(err.message), runs: [], byTask: [] };
+  }
 
-  const runs = parseRuns()
+  const base = spendFrom(all, { since, until });
+  if (!base.available) return { ...base, runs: [], byTask: [] };
+
+  const runs = all
     .filter((r) => (!since || (r.day && r.day >= since)) && (!until || (r.day && r.day <= until)))
     .map((r) => ({
       id: r.run,
@@ -251,13 +270,37 @@ export function localAgentDetail({ since, until } = {}) {
   };
 }
 
-export function localAgentSpend({ since, until } = {}) {
+const spendError = (message) => ({
+  available: false,
+  error: message,
+  cost: 0,
+  runs: 0,
+  tokens: 0,
+  firstDay: null,
+  lastDay: null,
+  dataDir: LOCAL_AGENT_DIR,
+  scan: lastScan,
+});
+
+/**
+ * Range-filtered rollup for the overview card. `available` is false when this
+ * machine has no local-agent transcripts at all, so the UI can drop the card
+ * rather than show a permanent $0.00 — but a read failure must NOT look like
+ * that, or the card vanishes and takes the explanation with it. It surfaces as
+ * `error` instead, and nothing is cached, so the next request retries.
+ */
+export function localAgentSpend(range = {}) {
   let all;
   try {
     all = parseRuns();
   } catch (err) {
-    return { available: false, error: err.message, cost: 0, runs: 0, tokens: 0, firstDay: null, lastDay: null, dataDir: LOCAL_AGENT_DIR, scan: lastScan };
+    return spendError(err.message);
   }
+  return spendFrom(all, range);
+}
+
+/** The rollup itself, split out so localAgentDetail can share one parseRuns(). */
+function spendFrom(all, { since, until } = {}) {
   const runs = all.filter((r) => (!since || (r.day && r.day >= since)) && (!until || (r.day && r.day <= until)));
   return {
     available: all.length > 0,
