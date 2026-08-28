@@ -410,6 +410,13 @@ describe('improvementSuggestions', () => {
     expect(improvementSuggestions().concentration.sessionCount).toBe(1);
   });
 
+  it('keeps a skipped session out of the per-model rate table entirely', () => {
+    // Distinct models, so the skipped session cannot hide behind a row another
+    // session would have created anyway.
+    analysis.sessions = [s('costless', { cost: 0, model: 'test-no1h' }), s('real', { cost: 5, model: 'test-opus' })];
+    expect(improvementSuggestions().byModel.map((m) => m.model)).toEqual(['test-opus']);
+  });
+
   it('reports zeroed totals over an empty corpus without dividing by zero', () => {
     expect(improvementSuggestions().totals).toEqual({ writeCost: 0, cost1h: 0, totalCost: 0, reuseRatio: 0 });
     expect(improvementSuggestions().concentration).toEqual({ top5Share: 0, sessionCount: 0 });
