@@ -48,6 +48,36 @@ let state = {
 };
 
 /**
+ * The only way state is replaced.
+ *
+ * scaledCache holds `<model>-fast` sheets derived from `state.rates` × the
+ * published premium, so it is only valid for the rates it was built from.
+ * Assigning state directly left it holding sheets scaled from the PREVIOUS
+ * sheet — a fast model would keep billing at the old rate for the life of the
+ * process. Only initPricing() happened to clear it; the cache and snapshot
+ * fallbacks inside it, and loadSnapshotSync(), did not.
+ */
+function setState(next) {
+  state = next;
+  scaledCache.clear();
+}
+
+/**
+ * The rate a 1h cache write bills at, falling back to the 5m rate.
+ *
+ * The fallback is the whole point: a model can publish
+ * `cache_creation_input_token_cost` without the `_above_1hr` variant, and a 1h
+ * write still has to bill at something. Lives here, in the module that owns
+ * pricing, because aggregate.js recomputes cache-write cost from the same rate
+ * sheet and MUST use the identical rule — three separate copies of this
+ * expression is three chances for the improvement tab to disagree with the
+ * total it is explaining.
+ */
+export function cacheWrite1hRateOf(rates) {
+  return rates?.cache_creation_input_token_cost_above_1hr ?? rates?.cache_creation_input_token_cost ?? 0;
+}
+
+/**
  * Models seen billing at speed=fast that we had no multiplier for.
  *
  * Never empty silently: such a message is charged at the standard rate, which
@@ -147,7 +177,6 @@ async function diskFastMultipliers() {
  */
 export async function initPricing() {
   resetUnknownFastModels();
-  scaledCache.clear();
   // Independent of the rate fetch: a models.dev outage must not cost us LiteLLM
   // rates, and vice versa. A missing multiplier surfaces through unknownFast.
   let fastMultipliers = null;
@@ -163,13 +192,13 @@ export async function initPricing() {
 
   try {
     const rates = await fetchLiteLLM();
-    state = {
+    setState({
       rates,
       fastMultipliers,
       source: 'litellm',
       fetchedAt: new Date().toISOString(),
       error: state.error,
-    };
+    });
     await fsp.mkdir(CACHE_DIR, { recursive: true });
     await fsp.writeFile(
       PRICES_CACHE_FILE,
@@ -186,14 +215,14 @@ export async function initPricing() {
   ]) {
     try {
       const doc = await readJson(file);
-      state = {
+      setState({
         rates: doc.rates ?? doc,
         // A live models.dev still wins over a stale on-disk copy.
         fastMultipliers: fastMultipliers ?? doc.fastMultipliers ?? null,
         source,
         fetchedAt: doc.fetchedAt ?? null,
         error: state.error,
-      };
+      });
       return state;
     } catch {
       // try the next fallback
@@ -280,8 +309,7 @@ export function costOf(usage, model) {
   const cc = usage.cache_creation ?? {};
   const write5m = cc.ephemeral_5m_input_tokens ?? 0;
   const write1h = cc.ephemeral_1h_input_tokens ?? 0;
-  const rate1h =
-    p.cache_creation_input_token_cost_above_1hr ?? p.cache_creation_input_token_cost ?? 0;
+  const rate1h = cacheWrite1hRateOf(p);
 
   return (
     (usage.input_tokens ?? 0) * (p.input_cost_per_token ?? 0) +
@@ -347,13 +375,13 @@ export async function writeSnapshot(models) {
 /** Load a snapshot synchronously — used by unit tests that skip initPricing(). */
 export function loadSnapshotSync() {
   const doc = JSON.parse(fs.readFileSync(PRICES_SNAPSHOT_FILE, 'utf8'));
-  state = {
+  setState({
     rates: doc.rates ?? doc,
     fastMultipliers: doc.fastMultipliers ?? null,
     source: 'snapshot',
     fetchedAt: doc.fetchedAt ?? null,
     error: null,
-  };
+  });
   return state;
 }
 

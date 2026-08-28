@@ -24,6 +24,7 @@ vi.mock('../src/config.js', () => ({
 const {
   billableParts,
   billingModelOf,
+  cacheWrite1hRateOf,
   costOf,
   fastMultiplierFor,
   hasRates,
@@ -38,8 +39,12 @@ const {
 } = await import('../src/pricing.js');
 
 const RATES = JSON.parse(fs.readFileSync(FIXTURE, 'utf8'));
+const CACHE = path.join(TMP, 'prices-cache.json');
 
 beforeEach(() => {
+  // Globally, not per-block: initPricing WRITES this file on a successful fetch,
+  // so one test's success silently became the next test's fallback rate sheet.
+  fs.rmSync(CACHE, { force: true });
   loadSnapshotSync();
   resetUnknownFastModels();
 });
@@ -94,6 +99,51 @@ describe('ratesFor', () => {
   it('returns null for a -fast variant whose base model is unpriced', () => {
     expect(ratesFor('ghost-fast')).toBeNull();
     expect(unknownFastModels()).not.toContain('ghost');
+  });
+});
+
+describe('cacheWrite1hRateOf', () => {
+  it('prefers the published above-1hr rate', () => {
+    expect(cacheWrite1hRateOf(RATES.rates['test-opus'])).toBe(0.00002);
+  });
+
+  it('falls back to the 5m rate when there is no 1h rate', () => {
+    expect(cacheWrite1hRateOf(RATES.rates['test-no1h'])).toBe(0.0000125);
+  });
+
+  it('bottoms out at zero for a sheet with no cache-write rate, and for nullish', () => {
+    expect(cacheWrite1hRateOf(RATES.rates['test-bare'])).toBe(0);
+    expect(cacheWrite1hRateOf(null)).toBe(0);
+    expect(cacheWrite1hRateOf(undefined)).toBe(0);
+  });
+
+  it('is the rule costOf actually bills a 1h write at', () => {
+    const usage = { cache_creation: { ephemeral_1h_input_tokens: 1000 } };
+    for (const model of ['test-opus', 'test-no1h', 'test-bare']) {
+      expect(costOf(usage, model)).toBeCloseTo(1000 * cacheWrite1hRateOf(RATES.rates[model]), 12);
+    }
+  });
+});
+
+describe('scaled -fast sheets are invalidated with the rate sheet', () => {
+  it('does not serve a -fast sheet scaled from a superseded rate sheet', async () => {
+    // Regression: scaledCache was only cleared at the top of initPricing, so the
+    // cache/snapshot fallbacks inside it — and loadSnapshotSync — swapped the
+    // rates out from under sheets already derived from the old ones.
+    expect(ratesFor('test-opus-fast').input_cost_per_token).toBeCloseTo(0.00002, 12);
+
+    vi.stubGlobal('fetch', async (url) => ({
+      ok: true,
+      json: async () =>
+        String(url) === 'https://models.test/api.json'
+          ? { p: { models: { 'test-opus': { cost: { input: 1 }, experimental: { modes: { fast: { cost: { input: 2 } } } } } } } }
+          : { 'test-opus': { input_cost_per_token: 0.5 } },
+    }));
+    await initPricing();
+    expect(ratesFor('test-opus-fast').input_cost_per_token).toBeCloseTo(1, 12);
+
+    loadSnapshotSync();
+    expect(ratesFor('test-opus-fast').input_cost_per_token).toBeCloseTo(0.00002, 12);
   });
 });
 
@@ -251,10 +301,6 @@ describe('initPricing', () => {
 
   const LITELLM = 'https://litellm.test/prices.json';
   const MODELSDEV = 'https://models.test/api.json';
-  const CACHE = path.join(TMP, 'prices-cache.json');
-  const dropCache = () => fs.rmSync(CACHE, { force: true });
-
-  beforeEach(dropCache);
 
   it('prefers live LiteLLM rates and writes them to the on-disk cache', async () => {
     stubFetch({

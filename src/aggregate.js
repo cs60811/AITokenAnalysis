@@ -1,6 +1,17 @@
 import { getAnalysis } from './cache.js';
 import { UNATTRIBUTED } from './attribute.js';
-import { ratesFor } from './pricing.js';
+import { cacheWrite1hRateOf, ratesFor } from './pricing.js';
+
+/**
+ * The 1h cache-write rate as the improvement tab DISPLAYS it.
+ *
+ * Same fallback chain as pricing's cacheWrite1hRateOf, but bottoming out at null
+ * rather than 0: this figure is shown to the user, and rendering an unknown rate
+ * as "0" reads as free. Billing bottoms out at 0 because a write still has to
+ * cost something; display bottoms out at null because "—" is the honest answer.
+ */
+const displayed1hRateOf = (r) =>
+  r?.cache_creation_input_token_cost_above_1hr ?? r?.cache_creation_input_token_cost ?? null;
 
 // Bounds arrive as either YYYY-MM-DD (from <input type="date">) or YYYYMMDD
 // (ccusage's native form). Strip separators so the comparison is format-agnostic.
@@ -146,7 +157,7 @@ function cacheWriteCostOf(byModel) {
     const r = ratesFor(bm.model);
     if (!r) continue;
     const t = bm.tokens;
-    const rate1h = r.cache_creation_input_token_cost_above_1hr ?? r.cache_creation_input_token_cost ?? 0;
+    const rate1h = cacheWrite1hRateOf(r);
     cost5m += t.cacheWrite5m * (r.cache_creation_input_token_cost ?? 0);
     cost1h += t.cacheWrite1h * rate1h;
     readCost += t.cacheRead * (r.cache_read_input_token_cost ?? 0);
@@ -272,12 +283,12 @@ export function improvementSuggestions({ since, until } = {}) {
         cost1h: 0,
         cost5m: 0,
         totalCost: 0,
-        rate1h: r?.cache_creation_input_token_cost_above_1hr ?? r?.cache_creation_input_token_cost ?? null,
+        rate1h: displayed1hRateOf(r),
         rates: {
           input: r?.input_cost_per_token ?? null,
           output: r?.output_cost_per_token ?? null,
           write5m: r?.cache_creation_input_token_cost ?? null,
-          write1h: r?.cache_creation_input_token_cost_above_1hr ?? r?.cache_creation_input_token_cost ?? null,
+          write1h: displayed1hRateOf(r),
           read: r?.cache_read_input_token_cost ?? null,
         },
       };
