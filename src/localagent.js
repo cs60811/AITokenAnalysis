@@ -34,6 +34,15 @@ const keyOf = (line) => (line.message?.id ? `id:${line.message.id}` : `uuid:${li
 const SCHEDULED_TASK_RE = /<scheduled-task\s+name="([^"]+)"/;
 const MANUAL = '（手動執行）';
 
+/** The `local_<uuid>` directory that identifies one scheduled-task run. */
+const RUN_DIR_PREFIX = 'local_';
+const AUDIT_FILE = 'audit.jsonl';
+const JSONL_EXT = '.jsonl';
+const UNKNOWN_RUN = '(unknown)';
+
+/** Enough of the prompt to recognise the run by, in a table cell. */
+const PROMPT_LABEL_CHARS = 90;
+
 /**
  * Subdirectories of `dir`, or [] when there are none.
  *
@@ -46,24 +55,16 @@ const MANUAL = '（手動執行）';
  */
 const dirsIn = (dir) => {
   try {
-    return fs.readdirSync(dir, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => path.join(dir, e.name));
+    return fs
+      .readdirSync(dir, { withFileTypes: true })
+      .filter((e) => e.isDirectory())
+      .map((e) => path.join(dir, e.name));
   } catch (err) {
     if (err.code === 'ENOENT' || err.code === 'ENOTDIR') return [];
     throw err;
   }
 };
 
-/**
- * Transcripts sit at exactly two spots under each run, both verified on this
- * machine (16 files each, no other shape):
- *   <workspace>/<conversation>/local_<id>/audit.jsonl
- *   <workspace>/<conversation>/local_<id>/.claude/projects/<encoded-cwd>/<sid>.jsonl
- *
- * Enumerated rather than walked on purpose: each run also carries a copy of the
- * skill bundles (docx/pptx/xlsx), so a recursive walk crosses ~430 directories
- * and costs ~85ms — on every request, since this runs behind /api/overview.
- * Reaching straight for the two known spots costs ~2ms.
- */
 /**
  * What the last scan actually saw, reported in the payload.
  *
@@ -78,35 +79,60 @@ const dirsIn = (dir) => {
  * failure here used to surface on the health card as if ~/.claude/projects had
  * failed to read.
  */
-let lastScan = { rootEntries: 0, files: 0, filesRead: 0, billableLines: 0, readErrors: [] };
+const emptyScan = () => ({ rootEntries: 0, files: 0, filesRead: 0, billableLines: 0, readErrors: [] });
+let lastScan = emptyScan();
 
-function transcriptFiles() {
+/**
+ * The two spots a run keeps transcripts, both verified on this machine (16 files
+ * each, no other shape):
+ *   <run>/audit.jsonl
+ *   <run>/.claude/projects/<encoded-cwd>/<sid>.jsonl
+ *
+ * Enumerated rather than walked on purpose: each run also carries a copy of the
+ * skill bundles (docx/pptx/xlsx), so a recursive walk crosses ~430 directories
+ * and costs ~85ms — on every request, since this runs behind /api/overview.
+ * Reaching straight for the two known spots costs ~2ms.
+ */
+function transcriptsOfRun(run) {
   const out = [];
-  const roots = dirsIn(LOCAL_AGENT_DIR);
-  lastScan = { rootEntries: roots.length, files: 0, filesRead: 0, billableLines: 0, readErrors: [] };
-  for (const workspace of roots) {
+  const audit = path.join(run, AUDIT_FILE);
+  if (fs.existsSync(audit)) out.push(audit);
+  for (const project of dirsIn(path.join(run, '.claude', 'projects'))) {
+    for (const f of fs.readdirSync(project)) {
+      if (f.endsWith(JSONL_EXT)) out.push(path.join(project, f));
+    }
+  }
+  return out;
+}
+
+/** The `local_*` run directories under the root, across every workspace and conversation. */
+function runDirs() {
+  const workspaces = dirsIn(LOCAL_AGENT_DIR);
+  const out = [];
+  for (const workspace of workspaces) {
     for (const conversation of dirsIn(workspace)) {
       for (const run of dirsIn(conversation)) {
-        if (!path.basename(run).startsWith('local_')) continue;
-        const audit = path.join(run, 'audit.jsonl');
-        if (fs.existsSync(audit)) out.push(audit);
-        for (const project of dirsIn(path.join(run, '.claude', 'projects'))) {
-          for (const f of fs.readdirSync(project)) if (f.endsWith('.jsonl')) out.push(path.join(project, f));
-        }
+        if (path.basename(run).startsWith(RUN_DIR_PREFIX)) out.push(run);
       }
     }
   }
-  lastScan.files = out.length;
+  return { rootEntries: workspaces.length, runs: out };
+}
+
+function transcriptFiles() {
+  const { rootEntries, runs } = runDirs();
+  const out = runs.flatMap(transcriptsOfRun);
+  lastScan = { ...emptyScan(), rootEntries, files: out.length };
   return out;
 }
 
 /** The `local_<uuid>` path segment identifies one scheduled-task run. */
 const runOf = (file) =>
-  path.relative(LOCAL_AGENT_DIR, file).split(path.sep).find((s) => s.startsWith('local_')) ?? '(unknown)';
+  path.relative(LOCAL_AGENT_DIR, file).split(path.sep).find((s) => s.startsWith(RUN_DIR_PREFIX)) ?? UNKNOWN_RUN;
 
 const dayOf = (iso) => (iso ? String(iso).slice(0, 10) : null);
 
-let memo = null; // { fp, runs }
+let memo = null; // { fp, runs, scan }
 
 function fingerprint(files) {
   const parts = [];
@@ -121,73 +147,101 @@ function fingerprint(files) {
   return parts.join('|');
 }
 
+/* ── parsing ──────────────────────────────────────────────────────────────── */
+
+const emptyTokens = () => ({ input: 0, output: 0, cacheWrite: 0, cacheRead: 0 });
+
+/** Cost and tokens of one billable line, skipping any part we cannot price. */
+function priceLine(line) {
+  let cost = 0;
+  const tokens = emptyTokens();
+  for (const part of billableParts(line.message.usage, line.message.model)) {
+    if (!hasRates(part.model)) continue;
+    cost += costOf(part.usage, part.model) ?? 0;
+    const t = tokensOf(part.usage);
+    tokens.input += t.input;
+    tokens.output += t.output;
+    tokens.cacheWrite += t.cacheWrite5m + t.cacheWrite1h;
+    tokens.cacheRead += t.cacheRead;
+  }
+  return { cost, tokens };
+}
+
+const newRunMeta = () => ({ task: null, prompt: null, models: new Set() });
+
 /**
- * One entry per run: { run, day, firstTs, cost, tokens, messages }.
+ * Name a run from its first human-visible user line.
+ *
+ * Automated runs open with the task envelope; the ones you set up by hand open
+ * with what you typed. Both are worth naming in the UI, so the first of each
+ * kind wins and later lines do not overwrite it.
+ */
+function noteUserLine(meta, line) {
+  if (line.type !== 'user' || line.isMeta || line.isSidechain) return;
+  const text = (textOf(line.message?.content) ?? '').trim();
+  if (!text) return;
+  meta.task ??= SCHEDULED_TASK_RE.exec(text)?.[1] ?? null;
+  meta.prompt ??= text.replace(/\s+/g, ' ').slice(0, PROMPT_LABEL_CHARS);
+}
+
+/**
+ * Read every transcript once: the priced messages keyed for dedup, and the
+ * per-run naming metadata.
+ *
  * Messages are priced at the larger of the two recorded copies — they differ on
  * 443 of 478 shared messages because each copy is written while the response is
  * still streaming, and the complete one is the one that was billed.
  */
-function parseRuns() {
-  const files = transcriptFiles();
-  const fp = fingerprint(files);
-  if (memo && memo.fp === fp) {
-    // A cache hit skips the read loop, so carry its counts forward — otherwise a
-    // perfectly healthy memo hit reports "files found, none read".
-    lastScan.filesRead = memo.scan.filesRead;
-    lastScan.billableLines = memo.scan.billableLines;
-    lastScan.readErrors = memo.scan.readErrors;
-    return memo.runs;
-  }
-
+function readMessages(files) {
   const byKey = new Map();
   const meta = new Map(); // run -> { task, prompt, models }
+
   for (const file of files) {
     const run = runOf(file);
     const lines = readLines(file, lastScan.readErrors);
     if (lines.length) lastScan.filesRead++;
-    for (const line of lines) {
-      const info = meta.get(run) ?? { task: null, prompt: null, models: new Set() };
+
+    let info = meta.get(run);
+    if (!info) {
+      info = newRunMeta();
       meta.set(run, info);
-      if (line.type === 'user' && !line.isMeta && !line.isSidechain) {
-        const t = (textOf(line.message?.content) ?? '').trim();
-        if (t) {
-          // Automated runs open with the task envelope; the ones you set up by
-          // hand open with what you typed. Both are worth naming in the UI.
-          info.task ??= SCHEDULED_TASK_RE.exec(t)?.[1] ?? null;
-          info.prompt ??= t.replace(/\s+/g, ' ').slice(0, 90);
-        }
-      }
+    }
+
+    for (const line of lines) {
+      noteUserLine(info, line);
       if (!isBillable(line)) continue;
       lastScan.billableLines++;
       info.models.add(line.message.model);
-      const k = keyOf(line);
-      let cost = 0;
-      const tk = { input: 0, output: 0, cacheWrite: 0, cacheRead: 0 };
-      for (const part of billableParts(line.message.usage, line.message.model)) {
-        if (!hasRates(part.model)) continue;
-        cost += costOf(part.usage, part.model) ?? 0;
-        const t = tokensOf(part.usage);
-        tk.input += t.input;
-        tk.output += t.output;
-        tk.cacheWrite += t.cacheWrite5m + t.cacheWrite1h;
-        tk.cacheRead += t.cacheRead;
+
+      const key = keyOf(line);
+      const priced = priceLine(line);
+      const prev = byKey.get(key);
+      if (!prev || priced.cost > prev.cost) {
+        byKey.set(key, { run, ts: line.timestamp ?? prev?.ts ?? null, ...priced });
       }
-      const prev = byKey.get(k);
-      if (!prev || cost > prev.cost) byKey.set(k, { run, ts: line.timestamp ?? prev?.ts ?? null, cost, tokens: tk });
     }
   }
+  return { byKey, meta };
+}
 
+const totalTokensOf = (t) => t.input + t.output + t.cacheWrite + t.cacheRead;
+
+/** Deduped messages folded into one entry per run, oldest run first. */
+function rollUpRuns(byKey, meta) {
   const runs = new Map();
   for (const m of byKey.values()) {
-    const r = runs.get(m.run) ?? { run: m.run, firstTs: m.ts, cost: 0, messages: 0, tokens: 0 };
+    let r = runs.get(m.run);
+    if (!r) {
+      r = { run: m.run, firstTs: m.ts, cost: 0, messages: 0, tokens: 0 };
+      runs.set(m.run, r);
+    }
     r.cost += m.cost;
     r.messages++;
-    r.tokens += m.tokens.input + m.tokens.output + m.tokens.cacheWrite + m.tokens.cacheRead;
+    r.tokens += totalTokensOf(m.tokens);
     if (m.ts && (!r.firstTs || m.ts < r.firstTs)) r.firstTs = m.ts;
-    runs.set(m.run, r);
   }
 
-  const list = [...runs.values()]
+  return [...runs.values()]
     .map((r) => {
       const info = meta.get(r.run) ?? {};
       return {
@@ -199,76 +253,34 @@ function parseRuns() {
       };
     })
     .sort((a, z) => String(a.firstTs).localeCompare(String(z.firstTs)));
+}
+
+/** One entry per run: { run, day, firstTs, cost, tokens, messages, task, prompt, models }. */
+function parseRuns() {
+  const files = transcriptFiles();
+  const fp = fingerprint(files);
+  if (memo && memo.fp === fp) {
+    // A cache hit skips the read loop, so carry its counts forward — otherwise a
+    // perfectly healthy memo hit reports "files found, none read".
+    Object.assign(lastScan, memo.scan);
+    return memo.runs;
+  }
+
+  const { byKey, meta } = readMessages(files);
+  const runs = rollUpRuns(byKey, meta);
   memo = {
     fp,
-    runs: list,
+    runs,
     scan: {
       filesRead: lastScan.filesRead,
       billableLines: lastScan.billableLines,
       readErrors: lastScan.readErrors,
     },
   };
-  return list;
+  return runs;
 }
 
-/**
- * Per-run detail for the local agent tab, grouped by scheduled task.
- *
- * Grouping by task is the point: one row per `<scheduled-task name>` answers
- * "what is this thing costing me per day", which is the only actionable
- * question here — these runs fire unattended and nobody is watching them.
- */
-export function localAgentDetail({ since, until } = {}) {
-  // One parseRuns() for both halves, and inside the guard. It used to run twice —
-  // once via localAgentSpend() and once below, the second outside any try/catch —
-  // so a directory disappearing between the two turned a reportable
-  // { available: false, error } payload into an unhandled 500 (dirsIn rethrows
-  // anything that is not ENOENT).
-  let all;
-  try {
-    all = parseRuns();
-  } catch (err) {
-    return { ...spendError(err.message), runs: [], byTask: [] };
-  }
-
-  const base = spendFrom(all, { since, until });
-  if (!base.available) return { ...base, runs: [], byTask: [] };
-
-  const runs = all
-    .filter((r) => (!since || (r.day && r.day >= since)) && (!until || (r.day && r.day <= until)))
-    .map((r) => ({
-      id: r.run,
-      task: r.task ?? MANUAL,
-      scheduled: Boolean(r.task),
-      startedAt: r.firstTs,
-      day: r.day,
-      cost: r.cost,
-      messages: r.messages,
-      tokens: r.tokens,
-      models: r.models,
-      prompt: r.prompt,
-    }))
-    .sort((a, z) => String(z.startedAt).localeCompare(String(a.startedAt)));
-
-  const byTask = new Map();
-  for (const r of runs) {
-    const t = byTask.get(r.task) ?? { task: r.task, scheduled: r.scheduled, runs: 0, cost: 0, tokens: 0, lastRun: null, models: new Set() };
-    t.runs++;
-    t.cost += r.cost;
-    t.tokens += r.tokens;
-    if (!t.lastRun || String(r.startedAt) > String(t.lastRun)) t.lastRun = r.startedAt;
-    for (const m of r.models) t.models.add(m);
-    byTask.set(r.task, t);
-  }
-
-  return {
-    ...base,
-    runs,
-    byTask: [...byTask.values()]
-      .map((t) => ({ ...t, models: [...t.models].sort(), avgCost: t.runs ? t.cost / t.runs : 0 }))
-      .sort((a, z) => z.cost - a.cost),
-  };
-}
+/* ── payloads ─────────────────────────────────────────────────────────────── */
 
 const spendError = (message) => ({
   available: false,
@@ -283,6 +295,26 @@ const spendError = (message) => ({
 });
 
 /**
+ * parseRuns() behind one guard, for both public entry points.
+ *
+ * dirsIn rethrows anything that is not ENOENT, and this used to run twice per
+ * detail request — once via localAgentSpend() and once outside any try/catch —
+ * so a directory disappearing between the two turned a reportable
+ * { available: false, error } payload into an unhandled 500.
+ */
+function tryParseRuns() {
+  try {
+    return { runs: parseRuns(), error: null };
+  } catch (err) {
+    return { runs: null, error: err.message };
+  }
+}
+
+/** Inclusive day-range filter, on the day a run started. */
+const inRange = (run, { since, until } = {}) =>
+  (!since || (run.day && run.day >= since)) && (!until || (run.day && run.day <= until));
+
+/**
  * Range-filtered rollup for the overview card. `available` is false when this
  * machine has no local-agent transcripts at all, so the UI can drop the card
  * rather than show a permanent $0.00 — but a read failure must NOT look like
@@ -290,30 +322,82 @@ const spendError = (message) => ({
  * `error` instead, and nothing is cached, so the next request retries.
  */
 export function localAgentSpend(range = {}) {
-  let all;
-  try {
-    all = parseRuns();
-  } catch (err) {
-    return spendError(err.message);
-  }
-  return spendFrom(all, range);
+  const { runs, error } = tryParseRuns();
+  return error === null ? spendFrom(runs, range) : spendError(error);
 }
 
 /** The rollup itself, split out so localAgentDetail can share one parseRuns(). */
-function spendFrom(all, { since, until } = {}) {
-  const runs = all.filter((r) => (!since || (r.day && r.day >= since)) && (!until || (r.day && r.day <= until)));
+function spendFrom(all, range = {}) {
+  const runs = all.filter((r) => inRange(r, range));
+  const sum = (rows, field) => rows.reduce((n, r) => n + r[field], 0);
   return {
     available: all.length > 0,
     error: null,
-    cost: runs.reduce((s, r) => s + r.cost, 0),
+    cost: sum(runs, 'cost'),
     runs: runs.length,
-    tokens: runs.reduce((s, r) => s + r.tokens, 0),
+    tokens: sum(runs, 'tokens'),
     firstDay: all[0]?.day ?? null,
     lastDay: all[all.length - 1]?.day ?? null,
     // Unfiltered, so an empty range can point at where the data actually is.
-    totalCost: all.reduce((s, r) => s + r.cost, 0),
+    totalCost: sum(all, 'cost'),
     totalRuns: all.length,
     dataDir: LOCAL_AGENT_DIR,
     scan: lastScan,
   };
+}
+
+/** One run as the detail tab shows it, newest first. */
+const runRow = (r) => ({
+  id: r.run,
+  task: r.task ?? MANUAL,
+  scheduled: Boolean(r.task),
+  startedAt: r.firstTs,
+  day: r.day,
+  cost: r.cost,
+  messages: r.messages,
+  tokens: r.tokens,
+  models: r.models,
+  prompt: r.prompt,
+});
+
+/**
+ * Runs grouped by scheduled task.
+ *
+ * Grouping by task is the point: one row per `<scheduled-task name>` answers
+ * "what is this thing costing me per day", which is the only actionable
+ * question here — these runs fire unattended and nobody is watching them.
+ */
+function groupByTask(rows) {
+  const byTask = new Map();
+  for (const r of rows) {
+    let t = byTask.get(r.task);
+    if (!t) {
+      t = { task: r.task, scheduled: r.scheduled, runs: 0, cost: 0, tokens: 0, lastRun: null, models: new Set() };
+      byTask.set(r.task, t);
+    }
+    t.runs++;
+    t.cost += r.cost;
+    t.tokens += r.tokens;
+    if (!t.lastRun || String(r.startedAt) > String(t.lastRun)) t.lastRun = r.startedAt;
+    for (const m of r.models) t.models.add(m);
+  }
+  return [...byTask.values()]
+    .map((t) => ({ ...t, models: [...t.models].sort(), avgCost: t.runs ? t.cost / t.runs : 0 }))
+    .sort((a, z) => z.cost - a.cost);
+}
+
+/** Per-run detail for the local agent tab, grouped by scheduled task. */
+export function localAgentDetail(range = {}) {
+  const { runs: all, error } = tryParseRuns();
+  if (error !== null) return { ...spendError(error), runs: [], byTask: [] };
+
+  const base = spendFrom(all, range);
+  if (!base.available) return { ...base, runs: [], byTask: [] };
+
+  const runs = all
+    .filter((r) => inRange(r, range))
+    .map(runRow)
+    .sort((a, z) => String(z.startedAt).localeCompare(String(a.startedAt)));
+
+  return { ...base, runs, byTask: groupByTask(runs) };
 }
