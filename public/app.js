@@ -1,18 +1,31 @@
-/* AI usage dashboard — vanilla JS + vendored Chart.js. */
+/* AI usage dashboard — vanilla JS + vendored Chart.js.
+   Pure logic (formatting, bucketing, sorting, validation) lives in lib.js and is
+   unit-tested; everything here is DOM, charts and fetch. */
+import {
+  bucketBy,
+  clampFont,
+  compact,
+  cycleSort,
+  escapeHtml,
+  exportRangeFrom,
+  FONT_MAX,
+  FONT_MIN,
+  FONT_STEP,
+  num,
+  sanitizeEmpId,
+  sanitizeSessionSort,
+  SESSION_SORTS,
+  sortIndicator,
+  sortRows,
+  usd,
+  usd4,
+  weekOf,
+  when,
+  yearOf,
+} from './lib.js';
 
 const $ = (sel) => document.querySelector(sel);
 const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
-
-const usd = (n) =>
-  n == null ? '—' : `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-const usd4 = (n) => (n == null ? '—' : `$${n.toFixed(n < 1 ? 4 : 2)}`);
-const num = (n) => (n == null ? '—' : n.toLocaleString('en-US'));
-const compact = (n) =>
-  n == null ? '—' : Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 1 }).format(n);
-const when = (ts) => (ts ? new Date(ts).toLocaleString('zh-TW', { hour12: false }) : '—');
-
-const escapeHtml = (s) =>
-  String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
 /** Categorical slots, assigned in fixed order and never cycled. */
 const SLOTS = ['--series-1', '--series-2', '--series-3', '--series-4', '--series-5', '--series-6', '--series-7', '--series-8'];
@@ -50,12 +63,7 @@ const api = async (path, opts) => {
 /* UI font zoom (CSS `zoom` on <html>) — one path for web and Electron, which
    both render this same page. `zoom` doesn't raise devicePixelRatio, so canvas
    charts would upscale and blur; render() compensates via config.devicePixelRatio. */
-const FONT_MIN = 0.8, FONT_MAX = 1.6, FONT_STEP = 0.1;
 let fontScale = clampFont(parseFloat(localStorage.getItem('font-scale')) || 1);
-function clampFont(v) {
-  // 5% granularity: matches the slider step and keeps ±10% button/keyboard steps clean.
-  return Math.min(FONT_MAX, Math.max(FONT_MIN, Math.round(v * 20) / 20));
-}
 
 let charts = {};
 function render(id, config) {
@@ -247,30 +255,6 @@ function drawOverview() {
 
 let dailyPeriod = 'day';
 
-/** Re-bucket ccusage rows: sum modelBreakdowns per keyOf(period). */
-function bucketBy(src, keyOf) {
-  const map = new Map();
-  for (const r of src) {
-    const k = keyOf(String(r.period));
-    const agg = map.get(k) ?? { period: k, modelBreakdowns: new Map() };
-    for (const b of r.modelBreakdowns ?? []) {
-      agg.modelBreakdowns.set(b.modelName, (agg.modelBreakdowns.get(b.modelName) ?? 0) + (b.cost ?? 0));
-    }
-    map.set(k, agg);
-  }
-  return [...map.values()].map((a) => ({
-    period: a.period,
-    modelBreakdowns: [...a.modelBreakdowns.entries()].map(([modelName, cost]) => ({ modelName, cost })),
-  }));
-}
-
-/** Monday of the week containing an ISO date — same anchor as the 趨勢 tab. */
-const weekOf = (iso) => {
-  const dt = new Date(`${iso.slice(0, 10)}T00:00:00Z`);
-  dt.setUTCDate(dt.getUTCDate() - ((dt.getUTCDay() + 6) % 7));
-  return dt.toISOString().slice(0, 10);
-};
-
 /**
  * Cost trend stacked by model, re-bucketed to day / week / month / year. `day` and
  * `month` come straight from ccusage (overview.daily / overview.monthly); `week`
@@ -287,7 +271,7 @@ function drawDailyTrend(period) {
   if (period === 'month') {
     rows = d.monthly ?? [];
   } else if (period === 'year') {
-    rows = bucketBy(d.monthly ?? [], (p) => p.slice(0, 4));
+    rows = bucketBy(d.monthly ?? [], yearOf);
   } else if (period === 'week') {
     rows = bucketBy(d.daily ?? [], weekOf);
   } else {
@@ -915,32 +899,14 @@ async function showPrompt(id) {
 
 /* ============================== TAB 3 ============================== */
 
-/* Multi-column sort for the session table. Each header click cycles that column
-   asc -> desc -> off; a column already in the list toggles in place and keeps its
-   priority, a new one is appended at the end. An empty list means "server order"
-   (trueCost desc) — which is what the third click restores. The list is persisted,
-   so the next visit opens with the same ordering. */
+/* The session table's sort list is persisted, so the next visit opens with the
+   same ordering. lib.js owns the list itself (validate / cycle / sort); this half
+   owns only the storage and the re-render. */
 const SESSION_SORT_KEY = 'sessions-sort';
-const SESSION_SORTS = {
-  projectLabel: { cmp: (a, b) => String(a.projectLabel ?? '').localeCompare(String(b.projectLabel ?? ''), 'zh-TW') },
-  lastActivity: { cmp: (a, b) => (Date.parse(a.lastActivity) || 0) - (Date.parse(b.lastActivity) || 0) },
-  promptCount: { cmp: (a, b) => (a.promptCount ?? 0) - (b.promptCount ?? 0) },
-  trueCost: { cmp: (a, b) => (a.trueCost ?? 0) - (b.trueCost ?? 0) },
-};
 
-/* A stale or hand-edited stored value must not take the whole tab down with it. */
 function loadSessionSort() {
   try {
-    const raw = JSON.parse(localStorage.getItem(SESSION_SORT_KEY) ?? '[]');
-    if (!Array.isArray(raw)) return [];
-    const seen = new Set();
-    const out = [];
-    for (const e of raw) {
-      if (!e || !SESSION_SORTS[e.key] || (e.dir !== 'asc' && e.dir !== 'desc') || seen.has(e.key)) continue;
-      seen.add(e.key);
-      out.push({ key: e.key, dir: e.dir });
-    }
-    return out;
+    return sanitizeSessionSort(JSON.parse(localStorage.getItem(SESSION_SORT_KEY) ?? '[]'));
   } catch {
     return [];
   }
@@ -949,39 +915,19 @@ function loadSessionSort() {
 let sessionSort = loadSessionSort();
 
 function cycleSessionSort(key) {
-  if (!SESSION_SORTS[key]) return;
-  const i = sessionSort.findIndex((e) => e.key === key);
-  if (i < 0) sessionSort.push({ key, dir: 'asc' });
-  else if (sessionSort[i].dir === 'asc') sessionSort[i] = { key, dir: 'desc' };
-  else sessionSort.splice(i, 1);
+  const next = cycleSort(sessionSort, key);
+  if (next === sessionSort) return; // unknown column: nothing to persist or redraw
+  sessionSort = next;
   try {
     localStorage.setItem(SESSION_SORT_KEY, JSON.stringify(sessionSort));
   } catch { /* private mode / quota: sorting still works for this visit */ }
   renderSessionsTable();
 }
 
-/* Sorts a copy — state.sessions.sessions stays in server order, which the overview
-   tab and the "cancel sort" state both read. Array.prototype.sort is stable, so ties
-   under the active keys fall back to that server order with no explicit tiebreak. */
-function sortedSessions(sessions) {
-  if (!sessionSort.length) return sessions;
-  return [...sessions].sort((a, b) => {
-    for (const { key, dir } of sessionSort) {
-      const v = SESSION_SORTS[key].cmp(a, b);
-      if (v) return dir === 'asc' ? v : -v;
-    }
-    return 0;
-  });
-}
-
 function sortableTh(key, label, cls = '') {
-  const i = sessionSort.findIndex((e) => e.key === key);
-  const active = i >= 0 ? sessionSort[i] : null;
-  const aria = active ? (active.dir === 'asc' ? 'ascending' : 'descending') : 'none';
-  const arrow = active ? (active.dir === 'asc' ? '▲' : '▼') : '';
-  // Priority index only earns its space once there is more than one key to order.
-  const rank = active && sessionSort.length > 1 ? `<sup class="sort-rank">${i + 1}</sup>` : '';
-  return `<th class="sortable${active ? ' sorted' : ''}${cls ? ` ${cls}` : ''}" data-sort="${key}" role="button" tabindex="0" aria-sort="${aria}" title="點擊排序：升冪 → 降冪 → 取消">${escapeHtml(label)}<span class="sort-ind">${arrow}</span>${rank}</th>`;
+  const { active, aria, arrow, rank } = sortIndicator(sessionSort, key);
+  const rankHtml = rank == null ? '' : `<sup class="sort-rank">${rank}</sup>`;
+  return `<th class="sortable${active ? ' sorted' : ''}${cls ? ` ${cls}` : ''}" data-sort="${key}" role="button" tabindex="0" aria-sort="${aria}" title="點擊排序：升冪 → 降冪 → 取消">${escapeHtml(label)}<span class="sort-ind">${arrow}</span>${rankHtml}</th>`;
 }
 
 /* Split out of drawSessions() so a header click re-renders only the table and
@@ -989,7 +935,7 @@ function sortableTh(key, label, cls = '') {
 function renderSessionsTable() {
   const d = state.sessions;
   if (!d) return;
-  const rows = sortedSessions(d.sessions);
+  const rows = sortRows(d.sessions, sessionSort);
 
   $('#table-sessions').innerHTML = `
     <thead><tr>
@@ -1501,14 +1447,10 @@ for (const id of ['#date-since', '#date-until']) {
 /* ============================== export ============================== */
 /** The active range; falls back to the loaded data's first/last day when 「全部」. */
 function exportRange() {
-  let since = $('#date-since').value;
-  let until = $('#date-until').value;
-  if (!since || !until) {
-    const days = (state.overview?.daily ?? []).map((x) => x.period).sort();
-    since = since || days[0];
-    until = until || days[days.length - 1];
-  }
-  return { since, until };
+  return exportRangeFrom(
+    { since: $('#date-since').value, until: $('#date-until').value },
+    (state.overview?.daily ?? []).map((x) => x.period),
+  );
 }
 
 $('#export').addEventListener('click', () => {
@@ -1542,8 +1484,7 @@ $('#export').addEventListener('click', () => {
 
   $('#export-form').addEventListener('submit', async (e) => {
     e.preventDefault();
-    // Same cleanup as the server: no path chars, no `_` (the filename separator).
-    const empId = $('#export-empid').value.replace(/["'\\/:*?<>|_]/g, '').trim();
+    const empId = sanitizeEmpId($('#export-empid').value);
     const device = $('#export-device').value;
     if (!empId) {
       const box = $('#export-error');
