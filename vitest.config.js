@@ -11,10 +11,12 @@ export default defineConfig({
       // browser window, public/ is a plain <script> with no exports, and
       // scripts/ is a one-shot build helper — none of them are exercised here.
       include: ['src/**/*.js'],
-      // server.js binds a port at import time; verify.js shells out to ccusage.
-      // Both are integration surfaces, covered by `npm run verify`, not by unit
-      // tests, and counting them would only depress the number that matters.
-      exclude: ['src/server.js', 'src/verify.js'],
+      // Integration surfaces, all three: server.js binds a port at import time,
+      // verify.js shells out to ccusage and reconciles against it, and update.js
+      // shells to git, fetches GitHub and restarts the process. They are covered
+      // by `npm run verify` and by actually running the app; driving them through
+      // mocked child_process would be scaffolding that tests the mocks.
+      exclude: ['src/server.js', 'src/verify.js', 'src/update.js'],
     },
   },
 });

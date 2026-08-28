@@ -70,29 +70,37 @@ export function filterDaily(doc, { since, until } = {}) {
   return { ...doc, daily: rows };
 }
 
+/**
+ * ccusage's OWN breakdown field names, deliberately.
+ *
+ * These rows stand in for `ccusage monthly`'s, so they must be shaped like
+ * ccusage's. modelTotalsFromDaily (ccusage.js) looks like the same aggregation
+ * and is not: it converts to our internal cacheWrite/cacheRead names. Two
+ * schemas, two audiences — do not merge them.
+ */
+const BREAKDOWN_FIELDS = ['cost', 'inputTokens', 'outputTokens', 'cacheCreationTokens', 'cacheReadTokens'];
+
+/** `period` is the dashed YYYY-MM-DD form ccusage emits in daily rows. */
+const monthKeyOf = (period) => String(period).slice(0, 'YYYY-MM'.length);
+
 /** Synthesize `ccusage monthly` rows from per-day rows (sum by YYYY-MM). */
 export function monthlyFromDaily(rows) {
   const byMonth = new Map();
   for (const r of rows) {
-    const key = String(r.period).slice(0, 7);
-    const m = byMonth.get(key) ?? { period: key, byModel: new Map() };
-    for (const b of r.modelBreakdowns ?? []) {
-      const t = m.byModel.get(b.modelName) ?? {
-        modelName: b.modelName,
-        cost: 0,
-        inputTokens: 0,
-        outputTokens: 0,
-        cacheCreationTokens: 0,
-        cacheReadTokens: 0,
-      };
-      t.cost += b.cost ?? 0;
-      t.inputTokens += b.inputTokens ?? 0;
-      t.outputTokens += b.outputTokens ?? 0;
-      t.cacheCreationTokens += b.cacheCreationTokens ?? 0;
-      t.cacheReadTokens += b.cacheReadTokens ?? 0;
-      m.byModel.set(b.modelName, t);
+    const key = monthKeyOf(r.period);
+    let month = byMonth.get(key);
+    if (!month) {
+      month = { period: key, byModel: new Map() };
+      byMonth.set(key, month);
     }
-    byMonth.set(key, m);
+    for (const b of r.modelBreakdowns ?? []) {
+      let t = month.byModel.get(b.modelName);
+      if (!t) {
+        t = { modelName: b.modelName, ...Object.fromEntries(BREAKDOWN_FIELDS.map((f) => [f, 0])) };
+        month.byModel.set(b.modelName, t);
+      }
+      for (const f of BREAKDOWN_FIELDS) t[f] += b[f] ?? 0;
+    }
   }
   return [...byMonth.values()]
     .sort((a, z) => a.period.localeCompare(z.period))

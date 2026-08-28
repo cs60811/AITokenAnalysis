@@ -37,6 +37,35 @@ function findNativeExe() {
 }
 
 /**
+ * `bin` in a package.json is either a string or a name -> path map. Both shapes
+ * occur for this package, and both resolution paths below have to handle both.
+ */
+const binPathOf = (bin) => (typeof bin === 'string' ? bin : bin?.ccusage);
+
+/** Where ccusage's cli lives when its manifest declares no `bin`. */
+const DEFAULT_CLI_REL = './src/cli.js';
+
+/**
+ * ccusage's JS entrypoint under the package.json at `pkgPath`, or null when the
+ * manifest names none and no fallback was given, or the file is not there.
+ */
+function cliUnder(pkgPath, bin, fallbackRel = null) {
+  const rel = binPathOf(bin) ?? fallbackRel;
+  if (!rel) return null;
+  const p = path.resolve(path.dirname(pkgPath), rel);
+  return fs.existsSync(p) ? p : null;
+}
+
+/** Global npm roots, in the order worth trying. */
+const GLOBAL_NODE_MODULES = [
+  path.join(path.dirname(process.execPath), 'node_modules'), // C:\Program Files\nodejs\node_modules
+  process.env.npm_config_prefix && path.join(process.env.npm_config_prefix, 'node_modules'),
+  process.env.APPDATA && path.join(process.env.APPDATA, 'npm', 'node_modules'),
+  '/usr/local/lib/node_modules',
+  '/usr/lib/node_modules',
+].filter(Boolean);
+
+/**
  * Locate ccusage's real JS entrypoint so we can run it with node directly.
  *
  * The `ccusage` on PATH is a .cmd/.ps1/sh shim trio. Since Node 20 (the
@@ -48,33 +77,20 @@ function findCli() {
   // 1. Installed alongside this project.
   try {
     const pkg = require.resolve('ccusage/package.json');
-    const bin = require(pkg).bin;
-    const rel = typeof bin === 'string' ? bin : bin?.ccusage;
-    if (rel) {
-      const p = path.resolve(path.dirname(pkg), rel);
-      if (fs.existsSync(p)) return p;
-    }
+    const found = cliUnder(pkg, require(pkg).bin);
+    if (found) return found;
   } catch {
     // not a local dependency — fall through to global locations
   }
 
-  // 2. Common global roots.
-  const roots = [
-    path.join(path.dirname(process.execPath), 'node_modules'), // C:\Program Files\nodejs\node_modules
-    process.env.npm_config_prefix && path.join(process.env.npm_config_prefix, 'node_modules'),
-    process.env.APPDATA && path.join(process.env.APPDATA, 'npm', 'node_modules'),
-    '/usr/local/lib/node_modules',
-    '/usr/lib/node_modules',
-  ].filter(Boolean);
-
-  for (const root of roots) {
+  // 2. Common global roots. A global install may declare no `bin` at all, so
+  //    this path carries a fallback the local one does not need.
+  for (const root of GLOBAL_NODE_MODULES) {
     const pkgPath = path.join(root, 'ccusage', 'package.json');
     if (!fs.existsSync(pkgPath)) continue;
     try {
-      const bin = JSON.parse(fs.readFileSync(pkgPath, 'utf8')).bin;
-      const rel = typeof bin === 'string' ? bin : bin?.ccusage;
-      const p = path.resolve(path.dirname(pkgPath), rel ?? './src/cli.js');
-      if (fs.existsSync(p)) return p;
+      const found = cliUnder(pkgPath, JSON.parse(fs.readFileSync(pkgPath, 'utf8')).bin, DEFAULT_CLI_REL);
+      if (found) return found;
     } catch {
       // keep looking
     }
@@ -208,7 +224,16 @@ export async function version() {
   return (await invoke(['--version'])).trim();
 }
 
-/** Flatten `daily` into per-model totals, split claude vs other agents. */
+/** ccusage reports other agents too; this is how we separate our own spend. */
+const CLAUDE_MODEL_PREFIX = 'claude';
+
+/**
+ * Flatten `daily` into per-model totals, split claude vs other agents.
+ *
+ * Emits OUR token names (cacheWrite/cacheRead). ccusage's wire names stop here
+ * — monthlyFromDaily in ccusage-cache.js deliberately does the opposite and
+ * preserves them, because its rows stand in for `ccusage monthly`'s own.
+ */
 export function modelTotalsFromDaily(doc) {
   const byModel = new Map();
   for (const day of doc.daily ?? []) {
@@ -230,7 +255,9 @@ export function modelTotalsFromDaily(doc) {
     }
   }
   const models = [...byModel.values()].sort((a, z) => z.cost - a.cost);
-  const claudeCost = models.filter((m) => m.model.startsWith('claude')).reduce((s, m) => s + m.cost, 0);
+  const claudeCost = models
+    .filter((m) => m.model.startsWith(CLAUDE_MODEL_PREFIX))
+    .reduce((s, m) => s + m.cost, 0);
   const totalCost = models.reduce((s, m) => s + m.cost, 0);
   return { models, claudeCost, otherCost: totalCost - claudeCost, totalCost };
 }
