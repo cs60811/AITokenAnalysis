@@ -30,7 +30,7 @@ describe('money and number formatting', () => {
   });
 
   it('renders a missing cost as an em dash, never as $0', () => {
-    // An unpriced model must not read as free work — see costOf() in pricing.js.
+    // 沒有定價的模型不該被讀成「免費的工作」—— 見 pricing.js 的 costOf()。
     expect(usd(null)).toBe(EMPTY);
     expect(usd(undefined)).toBe(EMPTY);
     expect(usd4(null)).toBe(EMPTY);
@@ -41,7 +41,7 @@ describe('money and number formatting', () => {
   });
 
   it('gives sub-dollar amounts four decimals, and larger ones two', () => {
-    // Per-prompt costs are routinely sub-cent; two decimals would show $0.00.
+    // 單一語句的成本經常不到 1 分錢；只顯示兩位小數會變成 $0.00。
     expect(usd4(0.0004)).toBe('$0.0004');
     expect(usd4(0.9999)).toBe('$0.9999');
     expect(usd4(1)).toBe('$1.00');
@@ -122,7 +122,7 @@ describe('bucketBy', () => {
 
 describe('weekOf', () => {
   it('anchors every day of a week on its Monday', () => {
-    // 2026-05-11 is a Monday, 2026-05-17 the Sunday that closes that week.
+    // 2026-05-11 是星期一，2026-05-17 則是結束那一週的星期日。
     for (const d of ['2026-05-11', '2026-05-13', '2026-05-17']) {
       expect(weekOf(d), d).toBe('2026-05-11');
     }
@@ -142,7 +142,7 @@ describe('weekOf', () => {
   });
 
   it('matches the Monday anchor the trend tab uses server-side', () => {
-    // aggregate.js weekKeyOf does the same (getUTCDay() + 6) % 7 arithmetic.
+    // aggregate.js 的 weekKeyOf 用的是同一套 (getUTCDay() + 6) % 7 算式。
     expect(weekOf('2026-05-06')).toBe('2026-05-04');
   });
 });
@@ -169,8 +169,8 @@ describe('clampFont', () => {
   });
 
   it('falls back to the minimum for a non-numeric scale', () => {
-    // parseFloat of a corrupt stored value yields NaN; Math.max(min, NaN) is NaN,
-    // so this pins whatever the current behaviour actually is.
+    // 對一個壞掉的儲存值做 parseFloat 會得到 NaN，而 Math.max(min, NaN) 還是 NaN，
+    // 所以這裡釘住的就是目前實際的行為。
     expect(Number.isNaN(clampFont(NaN))).toBe(true);
   });
 });
@@ -279,7 +279,7 @@ describe('sortRows', () => {
   });
 
   it('falls back to server order for rows tied under every active key', () => {
-    // Stable sort, so no explicit tiebreak is needed.
+    // 穩定排序，所以不需要額外寫決勝條件。
     const out = sortRows(rows, [{ key: 'promptCount', dir: 'asc' }]);
     expect(out.map((r) => r.sessionId)).toEqual(['a', 'b', 'c']);
   });

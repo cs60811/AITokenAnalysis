@@ -8,8 +8,8 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const FIXTURE = path.join(HERE, 'fixtures', 'prices.fixture.json');
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'aita-attr-'));
 
-// Same fixture rate sheet as the pricing tests: attribution is about WHICH turn
-// a dollar lands on, so the dollar amounts need to be predictable, not real.
+// 與 pricing 測試使用同一份費率表：歸因關心的是「一塊錢落在哪個 turn」，
+// 所以金額只要可預測就好，不需要是真實數字。
 vi.mock('../src/config.js', () => ({
   CACHE_DIR: TMP,
   PRICES_CACHE_FILE: path.join(TMP, 'prices-cache.json'),
@@ -31,7 +31,7 @@ beforeEach(() => {
   resetReadErrors();
 });
 
-/* ── fixture builders ─────────────────────────────────────────────────────── */
+/* ── 測試資料建構器 ───────────────────────────────────────────────────────── */
 
 let seq = 0;
 const dir = () => fs.mkdtempSync(path.join(TMP, `s${seq++}-`));
@@ -42,7 +42,7 @@ const jsonl = (file, lines) => {
   return file;
 };
 
-/** An assistant line costing exactly `input` * 1e-5 on test-opus. */
+/** 一行 assistant 記錄，在 test-opus 上的成本剛好是 `input` * 1e-5。 */
 const asst = (uuid, parentUuid, input, over = {}) => ({
   type: 'assistant',
   uuid,
@@ -64,7 +64,7 @@ const prompt = (uuid, text, over = {}) => ({
   ...over,
 });
 
-/** A session record shaped exactly as discoverSessions() yields one. */
+/** 一筆 session 記錄，形狀與 discoverSessions() 產出的完全相同。 */
 const session = (over = {}) => ({
   sessionId: 'sid-1',
   projectDir: 'proj',
@@ -159,7 +159,7 @@ describe('analyzeSession — main transcript attribution', () => {
     const r = analyzeSession(session({ main }));
     expect(r.unpricedModels).toEqual(['ghost-model']);
     expect(r.ownCost).toBe(0);
-    expect(r.tokens.input).toBe(1000); // tokens still counted
+    expect(r.tokens.input).toBe(1000); // token 仍然有被計算
   });
 
   it('bills an advisor iteration as its own byModel row', () => {
@@ -279,7 +279,7 @@ describe('analyzeSession — the three cost tiers', () => {
     const r = analyzeSession(session({ main, workflows: new Map([['run-9', [agentFile]]]) }));
     expect(turnOf(r, 'p1').workflowCost).toBeCloseTo(dollars(7000), 12);
     expect(r.workflowCost).toBeCloseTo(dollars(7000), 12);
-    expect(r.ccusageCost).toBe(0); // ccusage counts main + subagent only
+    expect(r.ccusageCost).toBe(0); // ccusage 只算 main + subagent
     expect(r.trueCost).toBeCloseTo(dollars(7000), 12);
     expect(r.workflowRunCount).toBe(1);
   });
@@ -374,7 +374,7 @@ describe('analyzeSession — the three cost tiers', () => {
 
     expect(r.unpricedModels).toEqual(['ghost-model']);
     expect(turnOf(r, 'p1').unpricedModels).toEqual(['ghost-model']);
-    // The priced half is still billed; the unpriced half contributes tokens only.
+    // 有定價的那一半仍然照常計費；沒有定價的那一半只貢獻 token。
     expect(r.subagentCost).toBeCloseTo(dollars(300), 12);
     expect(r.tokens.input).toBe(800);
   });
@@ -425,7 +425,7 @@ describe('analyzeSession — dedup via the shared seen set', () => {
     const b = analyzeSession(session({ sessionId: 'B', main: mainB }), seen);
 
     expect(a.ownCost).toBeCloseTo(dollars(1000), 12);
-    expect(b.ownCost).toBeCloseTo(dollars(500), 12); // only its genuinely new message
+    expect(b.ownCost).toBeCloseTo(dollars(500), 12); // 只有它真正新增的那則訊息
   });
 
   it('dedups a message shared between a main file and an agent file', () => {
@@ -493,8 +493,8 @@ describe('analyzeAll', () => {
       ]),
     });
 
-    // Insertion order deliberately puts the resumed session first: only the
-    // firstTimestamp sort should decide who keeps the replayed cost.
+    // 插入順序刻意把「被續接的」session 放前面：應該只有 firstTimestamp 的排序
+    // 能決定誰保住那筆被重播的成本。
     const out = analyzeAll(new Map([['resumed', resumed], ['older', older]]));
     const byId = Object.fromEntries(out.map((s) => [s.sessionId, s]));
     expect(byId.older.trueCost).toBeCloseTo(dollars(5000), 12);
@@ -511,8 +511,8 @@ describe('analyzeAll', () => {
         asst('a', 'p', 5000, { timestamp: undefined, message: { id: 'mn', model: 'test-opus', usage: { input_tokens: 5000 } } }),
       ]),
     });
-    // Same message id as the untimestamped session: whoever is processed first
-    // keeps it, so this asserts the ordering, not just the totals.
+    // 與那個沒有時間戳的 session 用同一個 message id：先被處理的一方會保住它，
+    // 所以這裡斷言的是「順序」，而不只是總額。
     const dated = session({
       sessionId: 'dated',
       main: jsonl(path.join(d, 'dated.jsonl'), [

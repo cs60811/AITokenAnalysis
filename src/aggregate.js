@@ -3,58 +3,55 @@ import { UNATTRIBUTED } from './attribute.js';
 import { cacheWrite1hRateOf, ratesFor } from './pricing.js';
 
 /**
- * The 1h cache-write rate as the improvement tab DISPLAYS it.
+ * 改善建議分頁「顯示用」的 1 小時快取寫入費率。
  *
- * Same fallback chain as pricing's cacheWrite1hRateOf, but bottoming out at null
- * rather than 0: this figure is shown to the user, and rendering an unknown rate
- * as "0" reads as free. Billing bottoms out at 0 because a write still has to
- * cost something; display bottoms out at null because "—" is the honest answer.
+ * 與 pricing 的 cacheWrite1hRateOf 是同一條 fallback 鏈，但最後是落在 null 而不是 0：
+ * 這個數字會顯示給使用者看，把未知費率呈現成「0」會被讀成免費。
+ * 計費落在 0 是因為寫入終究得有個價格；顯示落在 null 是因為「—」才是誠實的答案。
  */
 const displayed1hRateOf = (r) =>
   r?.cache_creation_input_token_cost_above_1hr ?? r?.cache_creation_input_token_cost ?? null;
 
-/** A session is flagged for low cache reuse only once its 1h writes cost this much. */
+/** 1 小時寫入的成本要達到這個金額，該 session 才會被標記為「快取重用率偏低」。 */
 const LOW_REUSE_MIN_1H_COST = 2;
 
 /**
- * Reuse below this is worth looking at; at or above it the cache is paying for
- * itself and "optimising" the writes would be the wrong advice. `> 0` as well:
- * a session with no reads at all has no reuse to judge yet.
+ * 重用率低於這個值才值得檢視；達到或超過它，代表快取已經回本，這時建議去
+ * 「優化」寫入反而是錯的。另外還要 `> 0`：完全沒有讀取的 session，還談不上重用率。
  */
 const LOW_REUSE_MAX_RATIO = 8;
 
-/** How many sessions the concentration figure and the top list cover. */
+/** 集中度數字與排行榜涵蓋幾個 session。 */
 const TOP_SESSION_COUNT = 5;
 
 const DAY_MS = 86_400_000;
 
-/** Cost attributed to Opus is the dominant lever, so the trend tracks it apart. */
+/** 歸屬到 Opus 的成本是最主要的槓桿，所以趨勢分頁把它單獨追蹤。 */
 const OPUS_MODEL_PREFIX = 'claude-opus';
 
-/** ISO timestamp -> YYYY-MM-DD, or null when there is no timestamp to bucket by. */
+/** ISO 時間戳 -> YYYY-MM-DD；沒有時間戳可分桶時回傳 null。 */
 const dayOf = (ts) => (ts ? ts.slice(0, 10) : null);
 
 /**
- * Read tokens per write token — "is the cache paying for itself".
- * Zero, not NaN or Infinity, when nothing was written: the UI shows this number.
+ * 每一個寫入 token 對應多少讀取 token —— 也就是「快取有沒有回本」。
+ * 什麼都沒寫入時回傳 0，而不是 NaN 或 Infinity：這個數字是會顯示在 UI 上的。
  */
 const reuseRatio = (readTok, writeTok) => (writeTok ? readTok / writeTok : 0);
 
-/** One part of a whole as a share, degrading to 0 rather than NaN. */
+/** 計算占比，分母為 0 時退化成 0 而不是 NaN。 */
 const shareOf = (part, whole) => (whole ? part / whole : 0);
 
-// Bounds arrive as either YYYY-MM-DD (from <input type="date">) or YYYYMMDD
-// (ccusage's native form). Strip separators so the comparison is format-agnostic.
+// 邊界值可能是 YYYY-MM-DD（來自 <input type="date">）或 YYYYMMDD（ccusage 的原生格式）。
+// 把分隔符去掉，比較時就不必在意是哪一種格式。
 const ymd = (s) => (s ? String(s).replace(/-/g, '') : s);
 
 /**
- * Is `ts` inside [since, until]? Both bounds are inclusive and either may be
- * absent, in which case that side is unbounded.
+ * `ts` 是否落在 [since, until] 之內？兩個邊界都是包含的，且任一邊都可以不給，
+ * 不給就代表該側無界。
  *
- * A row with no timestamp is included only when the window is fully open — it
- * cannot be placed, so any bound at all excludes it. Callers therefore need no
- * "are there bounds?" guard of their own: five of them used to carry one, and
- * every one was redundant.
+ * 沒有時間戳的資料列，只有在時間窗完全開放時才會被納入 —— 它無法被定位，
+ * 所以只要有任何一個邊界就會被排除。因此呼叫端不需要自己再寫一層「有沒有給邊界？」
+ * 的判斷：原本有五個地方各寫了一份，而且每一份都是多餘的。
  */
 const withinRange = (ts, since, until) => {
   if (!ts) return !since && !until;
@@ -67,13 +64,11 @@ const withinRange = (ts, since, until) => {
 };
 
 /**
- * Every attributable turn in the corpus that matches the filter, with the
- * session it belongs to.
+ * 語料中所有符合篩選條件、且可歸因的 turn，連同它所屬的 session 一起產出。
  *
- * The UNATTRIBUTED bucket is never a turn: it is the honest gap, and ranking or
- * trending it as if it were a prompt would be a lie about a prompt that does not
- * exist. Three rollups walked this same nested loop with this same pair of skip
- * conditions written out inline.
+ * UNATTRIBUTED 這個桶永遠不算 turn：它代表誠實承認的缺口，把它當成 prompt 拿去排名或
+ * 做趨勢，等於是在為一個不存在的 prompt 說謊。原本有三個彙總各自寫了一份同樣的巢狀迴圈，
+ * 內含同樣這兩個跳過條件。
  */
 function* eachTurn(sessions, { since, until, project } = {}) {
   for (const session of sessions) {
@@ -86,7 +81,7 @@ function* eachTurn(sessions, { since, until, project } = {}) {
   }
 }
 
-/** Fetch-or-create, so a rollup's accumulator map reads as one line at the call site. */
+/** 取值或建立，讓彙總用的累加 map 在呼叫端只佔一行。 */
 function upsert(map, key, create) {
   let v = map.get(key);
   if (!v) {
@@ -96,15 +91,14 @@ function upsert(map, key, create) {
   return v;
 }
 
-/** Descending by a numeric field — the order every ranking in this file uses. */
+/** 依某個數值欄位遞減 —— 本檔案每個排行榜都用這個順序。 */
 const byDesc = (field) => (a, z) => z[field] - a[field];
 
-/* ── sessions ─────────────────────────────────────────────────────────────── */
+/* ── session ──────────────────────────────────────────────────────────────── */
 
 /**
- * Session ranking. Ordered by cost, never by token count — see promptRanking for
- * why. The order itself is inherited from the analysis, which already sorted;
- * filtering must preserve it.
+ * Session 排行。依成本排序，絕不依 token 數 —— 原因見 promptRanking。
+ * 順序本身是從分析結果繼承來的（那邊已經排好），篩選時必須保留它。
  */
 export function sessionRanking({ since, until } = {}) {
   const { sessions, generatedAt, cached, parseMs } = getAnalysis();
@@ -127,20 +121,19 @@ export function sessionDetail(sessionId) {
   return {
     ...s,
     turns: s.turns
-      .map(({ text, ...t }) => t) // full text served separately, per the privacy decision
+      .map(({ text, ...t }) => t) // 依隱私決策，完整原文另外提供
       .sort(byDesc('trueCost')),
   };
 }
 
-/* ── prompts ──────────────────────────────────────────────────────────────── */
+/* ── prompt ───────────────────────────────────────────────────────────────── */
 
 /**
- * Prompt ranking across every session.
+ * 跨所有 session 的 prompt 排行。
  *
- * Ranked by cost, deliberately. 94% of tokens on this machine are cache reads,
- * which are ~10x cheaper per token — ranking by totalTokens would surface cheap
- * cache-heavy turns and bury the genuinely expensive ones, defeating the whole
- * point of the dashboard.
+ * 刻意依成本排序。本機 94% 的 token 是快取讀取，而它的單價便宜約 10 倍 ——
+ * 若依 totalTokens 排序，浮上來的會是那些便宜、大量讀快取的 turn，真正貴的反而被埋掉，
+ * 這樣整個儀表板就失去意義了。
  */
 export function promptRanking({ since, until, limit = 100, project } = {}) {
   const { sessions, generatedAt } = getAnalysis();
@@ -178,9 +171,9 @@ export function promptDetail(promptId) {
   return null;
 }
 
-/* ── projects ─────────────────────────────────────────────────────────────── */
+/* ── 專案 ─────────────────────────────────────────────────────────────────── */
 
-/** Projects rolled up, so spend can be traced to a codebase. */
+/** 依專案彙總，讓支出可以追溯到某個程式庫。 */
 export function projectRanking({ since, until } = {}) {
   const { sessions } = getAnalysis();
   const by = new Map();
@@ -204,7 +197,7 @@ export function projectRanking({ since, until } = {}) {
   return [...by.values()].sort(byDesc('trueCost'));
 }
 
-/* ── cache-write cost ─────────────────────────────────────────────────────── */
+/* ── 快取寫入成本 ─────────────────────────────────────────────────────────── */
 
 const CACHE_COST_FIELDS = ['cost5m', 'cost1h', 'writeCost', 'readCost', 'write5mTok', 'write1hTok', 'readTok'];
 
@@ -216,13 +209,12 @@ const addCacheCost = (dst, src) => {
 };
 
 /**
- * Dollar cost of one `byModel` entry's cache activity, split 5m / 1h.
+ * 單一筆 `byModel` 項目的快取活動金額，拆成 5 分鐘 / 1 小時。
  *
- * Cache-write cost is never stored separately — it's folded into ownCost/trueCost.
- * We recompute it here from the per-model token counts × per-model rates, using the
- * exact same rule as costOf() (pricing.js), including cacheWrite1hRateOf's fallback
- * to the 5m rate for a model with no 1h rate. A model with no rates at all
- * contributes nothing, exactly as trueCost skips it.
+ * 快取寫入成本從來不會被單獨儲存 —— 它已經被併進 ownCost/trueCost 裡。
+ * 這裡是用「各模型的 token 數 × 各模型的費率」重新算出來的，規則與 costOf()
+ * （pricing.js）完全相同，包含 cacheWrite1hRateOf 在模型沒有 1 小時費率時退回
+ * 5 分鐘費率的行為。完全沒有費率的模型不貢獻任何金額，與 trueCost 跳過它的做法一致。
  */
 function cacheCostOfModel(bm) {
   const r = ratesFor(bm.model);
@@ -241,7 +233,7 @@ function cacheCostOfModel(bm) {
   };
 }
 
-/** The same, summed over a whole `byModel` array. */
+/** 同上，但對整個 `byModel` 陣列加總。 */
 function cacheWriteCostOf(byModel) {
   const out = emptyCacheCost();
   for (const bm of byModel ?? []) addCacheCost(out, cacheCostOfModel(bm));
@@ -251,12 +243,11 @@ function cacheWriteCostOf(byModel) {
 const writeTokensOf = (c) => c.write5mTok + c.write1hTok;
 
 /**
- * Cache-write analysis — the actionable signal this tool exists for.
+ * 快取寫入分析 —— 這個工具存在的理由，也是真正可行動的訊號。
  *
- * Cache reads are ~94% of tokens but ~1/10 the price; the money worth chasing is
- * cache WRITE, especially the 1h tier (~2× input). Everything here is ranked by
- * write cost, split 5m vs 1h, at prompt and project granularity, plus a daily
- * trend and a write-vs-read reuse ratio.
+ * 快取讀取約占 token 的 94%，但單價只有約 1/10；真正值得追的錢是快取「寫入」，
+ * 尤其是 1 小時那一層（約為 input 的 2 倍）。這裡的一切都依寫入成本排序，
+ * 拆成 5 分鐘與 1 小時，並提供 prompt 與專案兩種粒度，外加每日趨勢與寫入/讀取重用率。
  */
 export function cacheWriteAnalysis({ since, until, limit = 30, project } = {}) {
   const { sessions, generatedAt } = getAnalysis();
@@ -270,8 +261,8 @@ export function cacheWriteAnalysis({ since, until, limit = 30, project } = {}) {
     addCacheCost(totals, c);
     totals.trueCost += turn.trueCost;
 
-    // A turn that wrote no cache has nothing to say on this tab, but its
-    // trueCost still belongs in the denominator above.
+    // 沒有寫入快取的 turn 在這個分頁沒什麼好說的，但它的 trueCost 仍然要算進
+    // 上面那個分母裡。
     if (c.writeCost <= 0) continue;
 
     prompts.push({
@@ -318,15 +309,14 @@ export function cacheWriteAnalysis({ since, until, limit = 30, project } = {}) {
   };
 }
 
-/* ── improvement signals ──────────────────────────────────────────────────── */
+/* ── 改善訊號 ─────────────────────────────────────────────────────────────── */
 
 /**
- * Per-model roll-up row, with that model's published rates for the rate table.
+ * 各模型的彙總列，附上該模型公布的費率，供費率表使用。
  *
- * Deliberately carries only the three cache-cost figures the improvement tab
- * shows, not the whole cache-cost record: the token counts and read cost are
- * working values here, and putting them on the row would widen the API payload
- * for no consumer.
+ * 刻意只帶改善建議分頁會顯示的那三個快取成本數字，而不是整份快取成本記錄：
+ * token 數與讀取成本在這裡只是中間值，把它們掛到這一列上，只會讓 API 回傳的資料
+ * 變寬，卻沒有任何使用端需要。
  */
 function newModelRow(model) {
   const r = ratesFor(model);
@@ -348,13 +338,12 @@ function newModelRow(model) {
 }
 
 /**
- * Improvement signals — turns the cache-write diagnosis into action.
+ * 改善訊號 —— 把快取寫入的診斷轉成可以行動的建議。
  *
- * Pure facts only (no dollar-savings estimates, by design). The frontend assembles
- * these into recommendation cards. The dominant lever in practice is model choice:
- * a premium model's 1h write rate is several × a cheaper one's, so a small share of
- * work moving down-tier saves a lot. Reuse is usually healthy, so we surface it too
- * to keep the user from "optimising" writes that are already paying off.
+ * 刻意只提供純事實（不做省下多少錢的估算）。前端會把這些組裝成建議卡片。
+ * 實務上最主要的槓桿是模型選擇：高階模型的 1 小時寫入費率是便宜模型的好幾倍，
+ * 所以只要把一小部分工作往下移一階就能省很多。重用率通常是健康的，所以我們也一併呈現，
+ * 免得使用者跑去「優化」那些其實已經回本的寫入。
  */
 export function improvementSuggestions({ since, until } = {}) {
   const { sessions, generatedAt } = getAnalysis();
@@ -365,14 +354,14 @@ export function improvementSuggestions({ since, until } = {}) {
   for (const s of sessions) {
     if (!withinRange(s.lastActivity, since, until)) continue;
 
-    // Priced per model, then summed — one traversal instead of two, and the
-    // session figure is then exactly the sum of the rows shown beside it.
+    // 先逐模型定價再加總 —— 只走訪一次而非兩次，而且這樣 session 的數字就會
+    // 恰好等於旁邊那些列的總和。
     const perModel = (s.byModel ?? []).map((bm) => ({ bm, cost: cacheCostOfModel(bm) }));
     const c = perModel.reduce((acc, x) => addCacheCost(acc, x.cost), emptyCacheCost());
 
-    // Nothing to say about a session that neither wrote cache nor cost anything.
-    // The skip has to come BEFORE the byModel table is touched, or a costless
-    // session puts a model in the rate table it contributed no spend to.
+    // 既沒寫快取、也沒花到錢的 session 沒什麼好說的。
+    // 這個跳過必須發生在動到 byModel 表「之前」，否則一個沒有花費的 session
+    // 會把一個它根本沒貢獻支出的模型塞進費率表裡。
     if (c.writeCost <= 0 && s.trueCost <= 0) continue;
 
     for (const { bm, cost } of perModel) {
@@ -418,12 +407,12 @@ export function improvementSuggestions({ since, until } = {}) {
   };
 }
 
-/* ── behaviour trend ──────────────────────────────────────────────────────── */
+/* ── 行為趨勢 ─────────────────────────────────────────────────────────────── */
 
-/** Monday-anchored week key (YYYY-MM-DD) for a given ISO date string. */
+/** 給一個 ISO 日期字串，算出以星期一為基準的週鍵值（YYYY-MM-DD）。 */
 function weekKeyOf(ts) {
   const d = new Date(dayOf(ts));
-  const dow = (d.getUTCDay() + 6) % 7; // 0 = Monday
+  const dow = (d.getUTCDay() + 6) % 7; // 0 = 星期一
   d.setUTCDate(d.getUTCDate() - dow);
   return d.toISOString().slice(0, 10);
 }
@@ -464,14 +453,14 @@ const finalizeTrend = (acc) => ({
 });
 
 /**
- * The equal-length window immediately before [since, until]: [since - len, since - 1day].
- * Null unless BOTH bounds are given — an open-ended window has no length to mirror.
+ * [since, until] 之前、等長的那一段時間窗：[since - 長度, since - 1 天]。
+ * 除非「兩個」邊界都有給，否則回傳 null —— 開放式的時間窗沒有長度可以對照。
  */
 function previousWindowOf(since, until) {
   if (!since || !until) return null;
   const start = Date.parse(`${since}T00:00:00Z`);
   const end = Date.parse(`${until}T00:00:00Z`);
-  const lenDays = Math.round((end - start) / DAY_MS) + 1; // inclusive
+  const lenDays = Math.round((end - start) / DAY_MS) + 1; // 含頭尾
   return {
     since: new Date(start - lenDays * DAY_MS).toISOString().slice(0, 10),
     until: new Date(start - DAY_MS).toISOString().slice(0, 10),
@@ -479,12 +468,11 @@ function previousWindowOf(since, until) {
 }
 
 /**
- * Behaviour trend — the "am I improving?" feedback loop.
+ * 行為趨勢 —— 「我有沒有進步？」的回饋迴圈。
  *
- * The improvement tab tells the user what to change; this shows whether the change
- * is working. We compute a bundle of habit metrics for the selected window, the
- * equal-length window before it (for a delta), and weekly buckets across the window
- * (for direction). Everything is turn-level and reuses cacheWriteCostOf.
+ * 改善建議分頁告訴使用者要改什麼；這裡則顯示改了之後有沒有效。我們會為所選時間窗、
+ * 它之前等長的時間窗（用來算差異）、以及該時間窗內的每週分桶（用來看方向）
+ * 各算出一組習慣指標。全部都是 turn 層級，並重複使用 cacheWriteCostOf。
  */
 export function behaviorTrend({ since, until } = {}) {
   const { sessions, generatedAt } = getAnalysis();
@@ -495,8 +483,8 @@ export function behaviorTrend({ since, until } = {}) {
   const prev = emptyTrendAcc();
   const weekMap = new Map();
 
-  // Not eachTurn(): this walk needs turns on BOTH sides of the window, so it
-  // cannot delegate the range test.
+  // 這裡不用 eachTurn()：這趟走訪需要時間窗「兩側」的 turn，所以無法把範圍判斷
+  // 委派出去。
   for (const s of sessions) {
     for (const t of s.turns) {
       if (t.promptId === UNATTRIBUTED || !t.timestamp) continue;
@@ -522,7 +510,7 @@ export function behaviorTrend({ since, until } = {}) {
   };
 }
 
-/* ── totals ───────────────────────────────────────────────────────────────── */
+/* ── 總計 ─────────────────────────────────────────────────────────────────── */
 
 export function ourClaudeTotal() {
   const { sessions } = getAnalysis();

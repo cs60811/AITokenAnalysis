@@ -1,21 +1,20 @@
 /**
- * The dashboard's pure logic: formatting, bucketing, sorting, validation.
+ * 儀表板的純邏輯：格式化、分桶、排序、驗證。
  *
- * Split out of app.js so it can be unit-tested. Nothing here touches the DOM,
- * localStorage, or fetch — every function takes values and returns values. The
- * side-effecting halves (read the stored sort, re-render the table, persist the
- * choice) stay in app.js and call into this.
+ * 從 app.js 拆出來，好讓它可以被單元測試。這裡完全不碰 DOM、localStorage 或 fetch ——
+ * 每個函式都是吃值、回值。有副作用的那一半（讀取儲存的排序、重繪表格、寫回選擇）
+ * 留在 app.js，由它呼叫這裡。
  */
 
-/* ── formatting ───────────────────────────────────────────────────────────── */
+/* ── 格式化 ───────────────────────────────────────────────────────────────── */
 
-/** Every "no value" renders as an em dash, never as $0 or 0 — see costOf(). */
+/** 所有「沒有數值」一律顯示破折號，絕不顯示 $0 或 0 —— 見 costOf()。 */
 export const EMPTY = '—';
 
 export const usd = (n) =>
   n == null ? EMPTY : `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
-/** Four decimals below a dollar: per-prompt costs are routinely sub-cent. */
+/** 未滿 1 美元顯示到小數第四位：單一語句的成本經常不到 1 分錢。 */
 export const usd4 = (n) => (n == null ? EMPTY : `$${n.toFixed(n < 1 ? 4 : 2)}`);
 
 export const num = (n) => (n == null ? EMPTY : n.toLocaleString('en-US'));
@@ -27,12 +26,12 @@ export const when = (ts) => (ts ? new Date(ts).toLocaleString('zh-TW', { hour12:
 
 const HTML_ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 
-/** Every interpolation into a template string goes through this. */
+/** 每一個要插進樣板字串的值都必須經過這裡。 */
 export const escapeHtml = (s) => String(s).replace(/[&<>"']/g, (c) => HTML_ESCAPES[c]);
 
-/* ── period bucketing ─────────────────────────────────────────────────────── */
+/* ── 期間分桶 ─────────────────────────────────────────────────────────────── */
 
-/** Re-bucket ccusage rows: sum modelBreakdowns per keyOf(period). */
+/** 重新分桶 ccusage 的資料列：依 keyOf(period) 把 modelBreakdowns 加總。 */
 export function bucketBy(src, keyOf) {
   const map = new Map();
   for (const r of src) {
@@ -52,7 +51,7 @@ export function bucketBy(src, keyOf) {
   }));
 }
 
-/** Monday of the week containing an ISO date — same anchor as the 趨勢 tab. */
+/** 某個 ISO 日期所在那一週的星期一 —— 與「趨勢」分頁用同一個基準。 */
 export const weekOf = (iso) => {
   const dt = new Date(`${iso.slice(0, 10)}T00:00:00Z`);
   dt.setUTCDate(dt.getUTCDate() - ((dt.getUTCDay() + 6) % 7));
@@ -61,26 +60,25 @@ export const weekOf = (iso) => {
 
 export const yearOf = (period) => period.slice(0, 4);
 
-/* ── font zoom ────────────────────────────────────────────────────────────── */
+/* ── 字體縮放 ─────────────────────────────────────────────────────────────── */
 
 export const FONT_MIN = 0.8;
 export const FONT_MAX = 1.6;
 export const FONT_STEP = 0.1;
 
-/** 5% granularity: matches the slider step and keeps ±10% steps clean. */
+/** 以 5% 為級距：與滑桿的步進一致，也讓 ±10% 的按鍵調整維持整齊。 */
 const FONT_GRANULARITY = 20;
 
 export function clampFont(v) {
   return Math.min(FONT_MAX, Math.max(FONT_MIN, Math.round(v * FONT_GRANULARITY) / FONT_GRANULARITY));
 }
 
-/* ── session table sorting ────────────────────────────────────────────────── */
+/* ── session 表格排序 ─────────────────────────────────────────────────────── */
 
 /**
- * Multi-column sort for the session table. Each header click cycles that column
- * asc -> desc -> off; a column already in the list toggles in place and keeps its
- * priority, a new one is appended at the end. An empty list means "server order"
- * (trueCost desc) — which is what the third click restores.
+ * session 表格的多欄排序。每次點擊標頭會讓該欄在「升冪 -> 降冪 -> 取消」之間循環；
+ * 已經在清單裡的欄位會就地切換並保留它的優先序，新的欄位則接在最後面。
+ * 空清單代表「伺服器順序」（trueCost 遞減）—— 那也正是第三次點擊要還原的狀態。
  */
 export const SESSION_SORTS = {
   projectLabel: { cmp: (a, b) => String(a.projectLabel ?? '').localeCompare(String(b.projectLabel ?? ''), 'zh-TW') },
@@ -92,11 +90,10 @@ export const SESSION_SORTS = {
 const DIRECTIONS = new Set(['asc', 'desc']);
 
 /**
- * A stored sort list, reduced to the entries that still make sense.
+ * 把儲存下來的排序清單，篩成仍然合理的那些項目。
  *
- * A stale or hand-edited stored value must not take the whole tab down with it:
- * unknown columns (renamed or removed since), bad directions and duplicates are
- * dropped rather than trusted.
+ * 一個過期或被手動改過的儲存值，絕不該把整個分頁一起拖垮：
+ * 不認識的欄位（後來被改名或移除的）、錯誤的排序方向、重複項目，一律丟掉而不是信任它。
  */
 export function sanitizeSessionSort(raw) {
   if (!Array.isArray(raw)) return [];
@@ -111,8 +108,8 @@ export function sanitizeSessionSort(raw) {
 }
 
 /**
- * The sort list after clicking `key`: absent -> asc -> desc -> absent.
- * Returns a new list; an unknown key leaves the current one untouched.
+ * 點擊 `key` 之後的排序清單：不存在 -> 升冪 -> 降冪 -> 不存在。
+ * 回傳一份新的清單；不認識的鍵則原封不動回傳目前這份。
  */
 export function cycleSort(current, key) {
   if (!SESSION_SORTS[key]) return current;
@@ -125,11 +122,11 @@ export function cycleSort(current, key) {
 }
 
 /**
- * Rows in the requested order.
+ * 依指定順序排好的資料列。
  *
- * Sorts a COPY: the caller's array stays in server order, which the overview tab
- * and the "cancel sort" state both read. Array.prototype.sort is stable, so ties
- * under the active keys fall back to that server order with no explicit tiebreak.
+ * 排序的是一份「副本」：呼叫端的陣列維持伺服器順序，而總覽分頁與「取消排序」
+ * 的狀態都會讀它。Array.prototype.sort 是穩定排序，所以在所有作用中的鍵上都相等的
+ * 資料列，自然會落回那個伺服器順序，不需要額外寫決勝條件。
  */
 export function sortRows(rows, sort) {
   if (!sort.length) return rows;
@@ -142,7 +139,7 @@ export function sortRows(rows, sort) {
   });
 }
 
-/** How one column should render its header: active direction, arrow, priority. */
+/** 單一欄位的標頭該怎麼呈現：目前的排序方向、箭頭、優先序。 */
 export function sortIndicator(sort, key) {
   const i = sort.findIndex((e) => e.key === key);
   if (i < 0) return { active: false, aria: 'none', arrow: '', rank: null };
@@ -151,22 +148,21 @@ export function sortIndicator(sort, key) {
     active: true,
     aria: asc ? 'ascending' : 'descending',
     arrow: asc ? '▲' : '▼',
-    // Priority index only earns its space once there is more than one key.
+    // 只有在作用中的鍵超過一個時，優先序數字才值得佔那個版面。
     rank: sort.length > 1 ? i + 1 : null,
   };
 }
 
-/* ── export dialog ────────────────────────────────────────────────────────── */
+/* ── 匯出對話框 ───────────────────────────────────────────────────────────── */
 
 /**
- * Same cleanup as the server: no path chars, no quotes, and no `_` — that is the
- * field separator in the export filename, so one inside the 工號 would split it.
+ * 與伺服器端相同的清理：不留路徑字元、不留引號、也不留 `_` —— 那是匯出檔名裡的
+ * 欄位分隔符，工號裡若含有它就會把檔名切錯。
  */
 export const sanitizeEmpId = (raw) => String(raw ?? '').replace(/["'\\/:*?<>|_]/g, '').trim();
 
 /**
- * The range to export: whatever the user picked, falling back per-side to the
- * first and last day the data actually covers.
+ * 要匯出的區間：以使用者選的為準，任一側沒選就分別退回資料實際涵蓋的第一天與最後一天。
  */
 export function exportRangeFrom({ since, until }, periods) {
   const days = [...periods].sort();

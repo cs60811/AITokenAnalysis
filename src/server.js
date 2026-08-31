@@ -42,7 +42,7 @@ const range = (req) => ({
   until: req.query.until || undefined,
 });
 
-/** Tab 1: every agent, from the cached full-range ccusage run, range-filtered here. */
+/** 分頁 1：所有 agent，資料來自快取的全區間 ccusage 執行結果，在這裡做區間篩選。 */
 app.get(
   '/api/overview',
   asJson(async (req) => {
@@ -51,18 +51,17 @@ app.get(
       ...ccusage.modelTotalsFromDaily(doc),
       daily: doc.daily,
       monthly: monthlyFromDaily(doc.daily),
-      // Off-books: not in totalCost, and invisible to ccusage. Same range filter
-      // as everything else on this tab, so the card can't disagree with its
-      // neighbours.
+      // 帳外支出：不計入 totalCost，ccusage 也看不到。套用與本分頁其他項目相同的
+      // 區間篩選，這樣這張卡片才不會和旁邊的數字對不起來。
       localAgent: localAgentSpend(range(req)),
     };
   }),
 );
 
-/** Desktop-app local agent mode: spend ccusage cannot see. See localagent.js. */
+/** 桌面版的 local agent mode：ccusage 看不到的支出。見 localagent.js。 */
 app.get('/api/localagent', asJson((req) => localAgentDetail(range(req))));
 
-/** Tab 2: our per-session analysis, with the ccusage-vs-true split. */
+/** 分頁 2：我們自己的各 session 分析，含 ccusage 數字與實際成本的差額拆分。 */
 app.get('/api/sessions', asJson((req) => sessionRanking(range(req))));
 
 app.get(
@@ -74,7 +73,7 @@ app.get(
   }),
 );
 
-/** Tab 3: prompt ranking. */
+/** 分頁 3：語句排行。 */
 app.get(
   '/api/prompts',
   asJson((req) =>
@@ -86,7 +85,7 @@ app.get(
   ),
 );
 
-/** Full prompt text, fetched only when the user clicks to expand. */
+/** 完整的 prompt 原文，只有在使用者點開時才抓取。 */
 app.get(
   '/api/prompts/:id',
   asJson((req) => {
@@ -99,11 +98,11 @@ app.get(
 app.get('/api/projects', asJson((req) => ({ projects: projectRanking(range(req)) })));
 
 /**
- * Export: raw `ccusage claude daily --since --until --mode calculate --breakdown --json`
- * as a download named 工號_since_until_使用位置.json.
+ * 匯出：把 `ccusage claude daily --since --until --mode calculate --breakdown --json`
+ * 的原始輸出，以 工號_起日_迄日_使用位置.json 的檔名提供下載。
  */
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
-/** 使用位置 codes: company=公司桌機, nb=自備筆電, home=家中使用. */
+/** 使用位置代碼：company＝公司桌機、nb＝自備筆電、home＝家中使用。 */
 const DEVICES = new Set(['company', 'nb', 'home']);
 app.get('/api/export', async (req, res) => {
   try {
@@ -111,8 +110,8 @@ app.get('/api/export', async (req, res) => {
     if (!DATE_RE.test(since ?? '') || !DATE_RE.test(until ?? '')) {
       return res.status(400).json({ error: 'since/until 必須是 YYYY-MM-DD', kind: 'bad_request' });
     }
-    // Filename-safe: drop control chars, path separators, quotes, and the `_`
-    // used as the field separator in the export filename.
+    // 確保檔名安全：去掉控制字元、路徑分隔符、引號，以及匯出檔名中用作欄位
+    // 分隔符的 `_`。
     const empId = String(req.query.empId ?? '').replace(/[\x00-\x1f"'\\/:*?<>|_]/g, '').trim();
     const device = String(req.query.device ?? '');
     if (!empId) {
@@ -137,7 +136,7 @@ app.get('/api/export', async (req, res) => {
   }
 });
 
-/** Cache-write analysis: the actionable cost signal, split 5m vs 1h. */
+/** 快取寫入分析：真正可行動的成本訊號，拆成 5 分鐘與 1 小時。 */
 app.get(
   '/api/cache-writes',
   asJson((req) =>
@@ -149,10 +148,10 @@ app.get(
   ),
 );
 
-/** Actionable improvement signals derived from the cache-write analysis. */
+/** 由快取寫入分析推導出的可行動改善訊號。 */
 app.get('/api/improvements', asJson((req) => improvementSuggestions(range(req))));
 
-/** Behaviour trend: current vs previous window + weekly buckets ("am I improving?"). */
+/** 行為趨勢：本期與前期對比，加上每週分桶（「我有沒有進步？」）。 */
 app.get('/api/trend', asJson((req) => behaviorTrend(range(req))));
 
 app.get(
@@ -194,9 +193,9 @@ app.get(
         cached: analysis.cached,
         dataDir: CLAUDE_PROJECTS_DIR,
         readErrors: analysis.readErrors ?? [],
-        // Since the last 重新整理. Both should read 1 for a whole refresh cycle:
-        // the nine parallel tab requests share one scan, so only one of them
-        // parses. See the scan cache in cache.js.
+        // 自上次「重新整理」以來的計數。整個重新整理週期這兩個都應該是 1：
+        // 九個並行的分頁請求共用同一次掃描，所以只有其中一個會真的去解析。
+        // 見 cache.js 裡的掃描快取。
         ...cacheStats(),
       },
       unattributed: { cost: un, pct: ours ? (un / ours) * 100 : 0 },
@@ -206,28 +205,27 @@ app.get(
 );
 
 /**
- * Drop the caches and return. Deliberately does NOT re-analyse: the client
- * immediately fetches every tab endpoint, and the first of those does the parse
- * while the rest share it via the scan cache (cache.js). Parsing here as well
- * made it TWO full passes — this one, and another for the burst, because the
- * ~1.4s parse outlives the scan TTL and a live session's fingerprint moves.
+ * 把快取丟掉就回傳。刻意「不」在這裡重新分析：前端隨即就會去打每一個分頁端點，
+ * 其中第一個會做解析，其餘的則透過掃描快取（cache.js）共用那次結果。
+ * 如果這裡也解析一次，就會變成「兩趟」完整解析 —— 這一趟，加上那一叢請求的另一趟，
+ * 因為約 1.4 秒的解析時間長於掃描 TTL，而進行中的 session 指紋又會變動。
  *
- * Nothing reads the response body (app.js awaits and discards it); the footer's
- * parseMs comes from /api/health, which is part of that same burst.
+ * 沒有人會讀這個回應的內容（app.js 只是 await 然後丟掉）；頁尾的 parseMs 來自
+ * /api/health，而它本身就是那一叢請求的一部分。
  */
 app.post('/api/refresh', asJson(() => {
   invalidate();
   invalidateCcusage();
-  fullDaily().catch(() => {}); // start the ccusage re-run now so the reload piggybacks on it
+  fullDaily().catch(() => {}); // 現在就開始重跑 ccusage，讓重新載入能順便搭上這次結果
   return { ok: true };
 }));
 
-/** Update check: is the tracked upstream ahead of us? Cached 30 min server-side. */
+/** 更新檢查：追蹤的上游分支是否領先我們？伺服器端快取 30 分鐘。 */
 app.get('/api/update-check', asJson((req) => checkForUpdate({ force: req.query.force === '1' })));
 
-/** One-click update: ff-only pull, then self-restart (npm install + npm start). */
+/** 一鍵更新：只做 fast-forward 的 pull，然後自我重啟（npm install + npm start）。 */
 app.post('/api/update', async (req, res) => {
-  // The packaged desktop app can't git-pull or npm-restart itself.
+  // 打包後的桌面版無法自己做 git pull 或用 npm 重啟。
   if (IS_DESKTOP) {
     return res.status(501).json({ error: '桌面版請至 GitHub Releases 下載新版', kind: 'unsupported' });
   }
@@ -244,8 +242,8 @@ app.post('/api/update', async (req, res) => {
 app.use(express.static(path.join(ROOT, 'public')));
 
 /**
- * Start listening. Exported so the Electron shell can run the same server
- * in-process on a dynamic port ({ port: 0 }) and read it off the return value.
+ * 開始監聽。之所以匯出，是為了讓 Electron 外殼能在同一個程序內、以動態 port
+ * （{ port: 0 }）跑同一份伺服器，並從回傳值讀出實際的 port。
  */
 export async function startServer({ host = HOST, port = PORT } = {}) {
   const status = await initPricing();
@@ -257,20 +255,20 @@ export async function startServer({ host = HOST, port = PORT } = {}) {
     console.log(`pricing: ${ps.source} (${ps.modelCount} models)${ps.stale ? ' [STALE]' : ''}`);
   }
 
-  // 127.0.0.1 only: this data is local and stays local.
+  // 只綁 127.0.0.1：這些資料是本機的，也只留在本機。
   const server = await new Promise((resolve, reject) => {
     const s = app.listen(port, host, () => resolve(s));
     s.on('error', reject);
   });
   console.log(`AI usage dashboard: http://${host}:${server.address().port}`);
 
-  // Warm the caches in the background so the first page load skips the ~4s CLI run.
+  // 在背景預熱快取，讓第一次載入頁面不必等那約 4 秒的 CLI 執行。
   fullDaily().catch(() => {});
   cachedVersion().catch(() => {});
   return server;
 }
 
-// CLI mode (`node src/server.js`, npm start, start.bat) — same behavior as ever.
+// CLI 模式（`node src/server.js`、npm start、start.bat）—— 行為與以往相同。
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   await startServer();
 }

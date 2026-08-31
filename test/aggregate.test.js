@@ -21,9 +21,9 @@ vi.mock('../src/config.js', () => ({
   CACHE_VERSION: 3,
 }));
 
-// aggregate.js reads everything through getAnalysis(). Feeding it synthetic
-// sessions is what lets these tests assert exact dollar figures — no transcripts,
-// no filesystem, no dependence on this machine's corpus.
+// aggregate.js 的資料全都是透過 getAnalysis() 取得的。餵它合成的 session，
+// 正是這些測試能斷言精確金額的原因 —— 不需要記錄檔、不碰檔案系統，
+// 也不依賴這台機器上的語料。
 const analysis = { sessions: [], generatedAt: 'GEN', cached: true, parseMs: 7, fileCount: 0, readErrors: [] };
 vi.mock('../src/cache.js', () => ({
   getAnalysis: () => analysis,
@@ -114,7 +114,7 @@ const sess = ({
   };
 };
 
-/* ── range filtering: the rule every endpoint shares ─────────────────────── */
+/* ── 日期範圍篩選：每個端點共用的規則 ────────────────────────────────────── */
 
 describe('range filtering', () => {
   beforeEach(() => {
@@ -129,8 +129,8 @@ describe('range filtering', () => {
     expect(sessionRanking().sessions).toHaveLength(3);
   });
 
-  // Row order is inherited from the analysis, which analyzeAll already sorted by
-  // cost; the range filter must preserve it rather than re-sorting.
+  // 資料列的順序是從分析結果繼承來的，而 analyzeAll 已經依成本排好；
+  // 範圍篩選必須保留那個順序，而不是重新排序。
   it('applies an inclusive lower bound', () => {
     expect(sessionRanking({ since: '2026-05-15' }).sessions.map((s) => s.sessionId)).toEqual(['may', 'jun']);
   });
@@ -256,7 +256,7 @@ describe('projectRanking', () => {
   });
 });
 
-/* ── cache-write analysis ─────────────────────────────────────────────────── */
+/* ── 快取寫入分析 ─────────────────────────────────────────────────────────── */
 
 describe('cacheWriteAnalysis', () => {
   const writeTurn = (id, w5, w1, read = 0, ts = '2026-05-10T00:00:00.000Z') =>
@@ -334,7 +334,7 @@ describe('cacheWriteAnalysis', () => {
   });
 });
 
-/* ── improvement signals ──────────────────────────────────────────────────── */
+/* ── 改善訊號 ─────────────────────────────────────────────────────────────── */
 
 describe('improvementSuggestions', () => {
   const s = (id, { cost, w5 = 0, w1 = 0, read = 0, model = 'test-opus', prompts = 1, project = 'p' } = {}) => ({
@@ -385,8 +385,8 @@ describe('improvementSuggestions', () => {
   });
 
   it('flags a low-reuse session only above the 1h cost floor and below the reuse ceiling', () => {
-    // cost1h must exceed $2 and reuse must sit in (0, 8).
-    const dear = 200_000; // 200000 * 2e-5 = $4.00 of 1h write
+    // cost1h 必須超過 $2，且重用率必須落在 (0, 8) 之間。
+    const dear = 200_000; // 200000 * 2e-5 = $4.00 的 1 小時寫入
     analysis.sessions = [
       s('flagged', { cost: 9, w1: dear, read: dear * 4 }),
       s('reuse-too-high', { cost: 9, w1: dear, read: dear * 20 }),
@@ -411,8 +411,8 @@ describe('improvementSuggestions', () => {
   });
 
   it('keeps a skipped session out of the per-model rate table entirely', () => {
-    // Distinct models, so the skipped session cannot hide behind a row another
-    // session would have created anyway.
+    // 用不同的模型，這樣被跳過的 session 就無法躲在另一個 session 本來就會
+    // 建立的那一列後面。
     analysis.sessions = [s('costless', { cost: 0, model: 'test-no1h' }), s('real', { cost: 5, model: 'test-opus' })];
     expect(improvementSuggestions().byModel.map((m) => m.model)).toEqual(['test-opus']);
   });
@@ -423,7 +423,7 @@ describe('improvementSuggestions', () => {
   });
 });
 
-/* ── behaviour trend ──────────────────────────────────────────────────────── */
+/* ── 行為趨勢 ─────────────────────────────────────────────────────────────── */
 
 describe('behaviorTrend', () => {
   const t = (id, ts, { cost = 1, w1 = 0, read = 0, model = 'test-opus' } = {}) => ({
@@ -432,7 +432,7 @@ describe('behaviorTrend', () => {
   });
 
   it('buckets turns into Monday-anchored weeks, ordered', () => {
-    // 2026-05-06 is a Wednesday; 2026-05-11 a Monday.
+    // 2026-05-06 是星期三；2026-05-11 是星期一。
     analysis.sessions = [
       sess({ id: 'a', turns: [t('p1', '2026-05-06T00:00:00.000Z'), t('p2', '2026-05-11T00:00:00.000Z'), t('p3', '2026-05-15T00:00:00.000Z')] }),
     ];
@@ -475,7 +475,7 @@ describe('behaviorTrend', () => {
   it('derives the habit ratios and the per-prompt average', () => {
     analysis.sessions = [sess({ id: 'a', turns: [t('p1', '2026-05-10T00:00:00.000Z', { cost: 8, w1: 1000, read: 4000 })] })];
     const c = behaviorTrend().current;
-    expect(c.oneHrShare).toBe(1); // all write cost is 1h here
+    expect(c.oneHrShare).toBe(1); // 這裡的寫入成本全部都是 1 小時的
     expect(c.reuse).toBeCloseTo(4, 12);
     expect(c.avgCostPerPrompt).toBe(8);
     expect(c.byModel).toEqual([{ model: 'test-opus', cost: 8 }]);

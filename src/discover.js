@@ -2,10 +2,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { CLAUDE_PROJECTS_DIR } from './config.js';
 
-/** Directories under a project that are not sessions. */
+/** 專案底下不屬於 session 的目錄。 */
 const IGNORED_DIRS = new Set(['memory', 'tool-results']);
 
-/** Agent transcripts sit under <sid>/subagents/, workflow runs one level deeper. */
+/** Agent 記錄放在 <sid>/subagents/ 底下，workflow 的執行則再深一層。 */
 const SUBAGENTS_DIR = 'subagents';
 const WORKFLOWS_DIR = 'workflows';
 const JSONL_EXT = '.jsonl';
@@ -17,13 +17,13 @@ const jsonlFilesIn = (dir) =>
   fs.readdirSync(dir).filter((f) => f.endsWith(JSONL_EXT)).map((f) => path.join(dir, f));
 
 /**
- * Fallback label for a project dir name, used only when no line carries a `cwd`.
+ * 從專案目錄名推出的備用標籤，只有在所有行都沒有 `cwd` 時才會用到。
  *
- * The encoding replaces every path separator AND every literal hyphen with '-',
- * so "MS-Web" and a separator are indistinguishable — splitting on '-' would
- * turn "…repos-MS-Web" into "Web". We therefore keep everything after the last
- * "repos-"/"source-" marker if present, and otherwise return the name as-is.
- * attribute.js overrides this with basename(cwd), which is authoritative.
+ * 這個編碼會把每個路徑分隔符「以及」每個原本就存在的連字號都換成 '-'，
+ * 所以 "MS-Web" 和一個分隔符根本分不出來 —— 用 '-' 去切會把 "…repos-MS-Web"
+ * 變成 "Web"。因此我們的做法是：若出現 "repos-"／"source-" 這個標記，
+ * 就保留它之後的全部內容；否則原名照回。
+ * attribute.js 會用 basename(cwd) 覆蓋這個結果，那才是權威來源。
  */
 export function projectLabelFromDirName(name) {
   const m = /(?:^|-)repos-(.+)$/.exec(name) ?? /(?:^|-)source-(.+)$/.exec(name);
@@ -31,8 +31,8 @@ export function projectLabelFromDirName(name) {
 }
 
 /**
- * The workflow runs under one `subagents/workflows` directory, keyed by runId
- * (the wf_* directory name). A run holding no transcript is not a run.
+ * 單一個 `subagents/workflows` 目錄底下的 workflow 執行，以 runId
+ * （wf_* 目錄名）為鍵。沒有任何記錄檔的執行不算一次執行。
  */
 function workflowRunsIn(wfRoot) {
   const runs = new Map();
@@ -44,11 +44,10 @@ function workflowRunsIn(wfRoot) {
 }
 
 /**
- * The two agent tiers under one session's `subagents/` directory.
+ * 單一 session 的 `subagents/` 目錄底下的兩個 agent 層級。
  *
- * They must stay separable all the way to the UI: `ccusage session` counts the
- * subagent tier and silently omits the workflow tier, and showing the gap is the
- * point of this tool.
+ * 它們必須一路可區分到 UI：`ccusage session` 只算 subagent 這一層，
+ * 會靜默地漏掉 workflow 那一層，而把這個差額呈現出來正是本工具的用意。
  */
 function agentTiersIn(subDir) {
   const subagents = [];
@@ -64,9 +63,9 @@ function agentTiersIn(subDir) {
 }
 
 /**
- * Walk ~/.claude/projects and group every .jsonl by session, tagged by tier.
+ * 走訪 ~/.claude/projects，把每個 .jsonl 依 session 分組並標記所屬層級。
  *
- * Layout verified on this machine (337 files / 103.7 MB):
+ * 目錄結構已在本機驗證（337 個檔案／103.7 MB）：
  *   <project>/<sid>.jsonl                                  -> main
  *   <project>/<sid>/subagents/agent-N.jsonl                -> subagent
  *   <project>/<sid>/subagents/workflows/<runId>/agent-N     -> workflow
@@ -100,14 +99,14 @@ export function discoverSessions(root = CLAUDE_PROJECTS_DIR) {
     const projPath = path.join(root, projectDir);
 
     for (const ent of entriesIn(projPath)) {
-      // main transcript: <sid>.jsonl
+      // 主記錄：<sid>.jsonl
       if (isJsonl(ent)) {
         get(ent.name.slice(0, -JSONL_EXT.length), projectDir).main = path.join(projPath, ent.name);
         continue;
       }
       if (!ent.isDirectory() || IGNORED_DIRS.has(ent.name)) continue;
 
-      // A session directory, whose agent transcripts live under subagents/.
+      // 一個 session 目錄，它的 agent 記錄都放在 subagents/ 底下。
       const subDir = path.join(projPath, ent.name, SUBAGENTS_DIR);
       if (!fs.existsSync(subDir)) continue;
       Object.assign(get(ent.name, projectDir), agentTiersIn(subDir));

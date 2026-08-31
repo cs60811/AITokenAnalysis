@@ -1,19 +1,18 @@
 /**
- * Server host: runs the Express server in a CHILD process.
+ * 伺服器宿主：把 Express 伺服器跑在一個「子程序」裡。
  *
- * Everything the server does on a cold refresh is synchronous — discoverSessions()
- * (nested readdirSync), the fingerprint (one statSync per transcript), readLines()
- * (readFileSync of ~170 MB, then JSON.parse per line) and JSON.parse of ccusage's
- * stdout. Run in the Electron main process, that work stalls the event loop for
- * seconds and Windows paints the window as 「沒有回應」. Out here it cannot touch
- * the UI — which is exactly why web mode never froze.
+ * 伺服器在冷啟動重新整理時做的每件事都是同步的 —— discoverSessions()
+ * （巢狀 readdirSync）、算指紋（每個記錄檔一次 statSync）、readLines()
+ * （readFileSync 約 170 MB，再逐行 JSON.parse），以及對 ccusage stdout 的 JSON.parse。
+ * 這些工作若跑在 Electron 主程序裡，會把事件迴圈卡住好幾秒，Windows 就會把視窗畫成
+ * 「沒有回應」。放到這裡之後它碰不到 UI —— 這也正是網頁版從來不會凍住的原因。
  *
- * CommonJS on purpose: utilityProcess.fork() loads its entry point with require(),
- * and src/server.js is ESM with a top-level await, so only dynamic import() can
- * load it. A .cjs extension is unambiguous under package.json "type": "module".
+ * 刻意用 CommonJS：utilityProcess.fork() 是用 require() 載入進入點的，
+ * 而 src/server.js 是帶有頂層 await 的 ESM，只有動態 import() 才載得動它。
+ * 在 package.json 標了 "type": "module" 的情況下，.cjs 副檔名是沒有歧義的。
  *
- * Mechanism-agnostic messaging: works as an Electron utilityProcess
- * (process.parentPort) and as a plain child_process.fork (process.send).
+ * 與傳遞機制無關的訊息傳送：在 Electron utilityProcess（process.parentPort）
+ * 和單純的 child_process.fork（process.send）底下都能運作。
  */
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
@@ -22,23 +21,23 @@ const send = process.parentPort
   ? (msg) => process.parentPort.postMessage(msg)
   : (msg) => process.send?.(msg);
 
-// child_process.fork only: the IPC channel closes when the parent dies, so we
-// never outlive it. utilityProcess children are reaped by Chromium's job object.
+// 只適用於 child_process.fork：父程序結束時 IPC 通道會關閉，所以我們絕不會活得比它久。
+// utilityProcess 的子程序則是由 Chromium 的 job object 負責回收。
 if (!process.parentPort) process.on('disconnect', () => process.exit(0));
 
 function fatal(err) {
   try {
     send({ type: 'error', message: err?.message ?? String(err), stack: err?.stack ?? null });
   } catch {
-    // parent already gone
+    // 父程序已經不在了
   }
   console.error(err?.stack ?? String(err));
-  // Let the message flush before dying.
+  // 在結束前讓訊息先送出去。
   setTimeout(() => process.exit(1), 50);
 }
 
 process.on('uncaughtException', fatal);
-// A stray rejection must not take the dashboard down — it never did in-process.
+// 一個漏接的 rejection 不該把整個儀表板拖垮 —— 以前在同程序內也從來不會。
 process.on('unhandledRejection', (reason) => {
   console.error('unhandledRejection:', reason);
 });
@@ -46,7 +45,7 @@ process.on('unhandledRejection', (reason) => {
 (async () => {
   const entry = pathToFileURL(path.join(__dirname, '..', 'src', 'server.js')).href;
   const { startServer } = await import(entry);
-  // Dynamic port: never clashes with a web-mode instance on 4317.
+  // 動態 port：絕不會和網頁版跑在 4317 的實例衝突。
   const server = await startServer({ port: Number(process.env.AITA_PORT) || 0 });
   send({ type: 'listening', port: server.address().port });
 })().catch(fatal);

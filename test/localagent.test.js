@@ -33,7 +33,7 @@ beforeEach(() => {
   fs.rmSync(AGENT_ROOT, { recursive: true, force: true });
 });
 
-/* ── fixture builders ─────────────────────────────────────────────────────── */
+/* ── 測試資料建構器 ───────────────────────────────────────────────────────── */
 
 const write = (file, lines) => {
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -50,7 +50,7 @@ const asst = (id, input, ts = '2026-05-01T00:00:00.000Z', model = 'test-opus') =
 const userLine = (text) => ({ type: 'user', uuid: `u-${text.length}`, message: { content: text } });
 
 /**
- * One local-agent run at the layout this module reads:
+ * 一次 local agent 執行，其目錄結構就是這個模組會去讀的形狀：
  *   <root>/<workspace>/<conversation>/local_<id>/audit.jsonl
  *   <root>/<workspace>/<conversation>/local_<id>/.claude/projects/<enc>/<sid>.jsonl
  */
@@ -85,8 +85,8 @@ describe('localAgentSpend — availability', () => {
 
   it('surfaces a scan failure as an error rather than as "no data"', () => {
     run('a', { audit: [asst('m1', 1000)] });
-    // A permission-class failure must not read as an empty machine: the card
-    // would vanish and take the explanation with it.
+    // 權限類的失敗不該被讀成「這台機器沒資料」：那樣卡片會消失，
+    // 連同解釋一起帶走。
     const spy = vi.spyOn(fs, 'readdirSync').mockImplementation(() => {
       throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
     });
@@ -124,9 +124,8 @@ describe('localAgentSpend — costing', () => {
   });
 
   it('counts a message recorded in both copies once, at the larger cost', () => {
-    // Both copies are written while the response streams; the complete one is
-    // the one that was billed. Keyed on message.id, because the audit copy
-    // carries no requestId.
+    // 兩份副本都是在回應串流當下寫下的；完整的那份才是實際被計費的那份。
+    // 以 message.id 為鍵，因為 audit 那份副本沒有 requestId。
     run('a', {
       audit: [asst('m1', 100)],
       nested: [asst('m1', 900)],
@@ -159,7 +158,7 @@ describe('localAgentSpend — costing', () => {
     const { getReadErrors, resetReadErrors } = await import('../src/parser.js');
     resetReadErrors();
     const base = run('a', { audit: [asst('m1', 100)] });
-    // A directory where a .jsonl is expected fails to read as a file.
+    // 在預期是 .jsonl 的位置放一個目錄，當成檔案讀就會失敗。
     fs.mkdirSync(path.join(base, '.claude', 'projects', 'enc', 'bad.jsonl'), { recursive: true });
 
     const r = localAgentSpend();
@@ -190,7 +189,7 @@ describe('localAgentSpend — range filtering', () => {
     expect(r.cost).toBe(0);
     expect(r.totalRuns).toBe(3);
     expect(r.totalCost).toBeCloseTo(dollars(700), 12);
-    // So an empty range can point at where the data actually is.
+    // 這樣當某個區間查無資料時，還能指出資料實際落在哪裡。
     expect(r.firstDay).toBe('2026-05-01');
     expect(r.lastDay).toBe('2026-05-20');
   });
@@ -291,7 +290,7 @@ describe('memoization', () => {
     const first = localAgentSpend();
     const second = localAgentSpend();
     expect(second.cost).toBeCloseTo(first.cost, 12);
-    // A healthy memo hit must not report "files found, none read".
+    // 一次正常的快取命中，不該回報成「找到檔案，但一個都沒讀」。
     expect(second.scan).toMatchObject({ files: 1, filesRead: 1, billableLines: 1 });
   });
 

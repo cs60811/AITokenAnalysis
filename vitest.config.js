@@ -7,16 +7,14 @@ export default defineConfig({
     coverage: {
       provider: 'v8',
       reporter: ['text', 'html'],
-      // The analysis core, plus the frontend's pure logic. app.js itself is DOM,
-      // charts and fetch — verified by running the page, not by unit tests (see
-      // exclude). electron/ hosts a browser window and scripts/ is a one-shot
-      // build helper; neither is exercised here.
+      // 分析核心，加上前端的純邏輯。app.js 本身是 DOM、圖表與 fetch ——
+      // 那是靠實際跑頁面驗證的，不是靠單元測試（見下方 exclude）。
+      // electron/ 裝的是瀏覽器視窗，scripts/ 是一次性的建置輔助工具，兩者都不在此涵蓋。
       include: ['src/**/*.js', 'public/lib.js'],
-      // Integration surfaces, all three: server.js binds a port at import time,
-      // verify.js shells out to ccusage and reconciles against it, and update.js
-      // shells to git, fetches GitHub and restarts the process. They are covered
-      // by `npm run verify` and by actually running the app; driving them through
-      // mocked child_process would be scaffolding that tests the mocks.
+      // 這三個都是整合面：server.js 載入時就會綁 port，verify.js 會呼叫 ccusage
+      // 並與它對帳，update.js 則會呼叫 git、抓 GitHub 並重啟程序。
+      // 它們由 `npm run verify` 以及實際把 app 跑起來涵蓋；用假的 child_process
+      // 去驅動它們，只會變成「測試那些假物件」的鷹架。
       exclude: ['src/server.js', 'src/verify.js', 'src/update.js', 'public/app.js', 'public/vendor/**'],
     },
   },

@@ -1,9 +1,9 @@
 /**
- * Reconciliation gate. Run with `npm run verify`.
+ * 對帳閘門。以 `npm run verify` 執行。
  *
- * Every expected value here was measured against real data during design; they are
- * regression anchors, not guesses. If ccusage changes its behaviour or the parser
- * drifts, these fail loudly rather than quietly mis-reporting money.
+ * 這裡每一個預期值都是設計期間對真實資料實測出來的；它們是迴歸的定錨點，不是猜的。
+ * 只要 ccusage 改了行為，或解析器偏掉了，這些檢查會大聲地失敗，
+ * 而不是安靜地把金額報錯。
  */
 import { analyzeAll, analyzeSession } from './attribute.js';
 import { discoverSessions } from './discover.js';
@@ -79,17 +79,17 @@ async function main() {
   check(real > 0 && real < strUser, 'classifier drops machine-generated prompts', `${real}/${strUser} kept (${(100 - (real / strUser) * 100).toFixed(0)}% noise)`);
 
   console.log('\n5. Tier split on the anchor session');
-  // Claude Code prunes ~/.claude/projects on a retention schedule, so a session
-  // pinned by UUID eventually disappears and every check reading it becomes
-  // unrunnable. Skip rather than crash — check 2 already reported the absence.
+  // Claude Code 會依保留期清理 ~/.claude/projects，所以用 UUID 釘住的 session
+  // 終究會消失，每個讀它的檢查也就跑不動了。
+  // 選擇跳過而不是直接掛掉 —— 第 2 項檢查已經回報過它不存在了。
   if (!anchor?.main) {
     console.log('  SKIP  anchor session no longer on disk (retention); see check 2');
   } else {
     const a = analyzeSession(anchor);
-    // Re-baselined when streamed messages started being counted at their final
-    // usage: the anchor's agent files hold partial writes, so subagent (+$0.04)
-    // and workflow (+$3.51) both grew. ownCost is unchanged — this June session
-    // predates the advisor tier and its main transcript has no partial writes.
+    // 在「串流訊息改以最終 usage 計算」之後重新定過基準：這個定錨 session 的 agent
+    // 檔案裡有部分寫入，所以 subagent（+$0.04）與 workflow（+$3.51）都變大了。
+    // ownCost 沒變 —— 這個六月的 session 早於 advisor 層出現，
+    // 而且它的主記錄裡沒有任何部分寫入。
     check(near(a.ownCost, 86.89144, 0.01), 'ownCost = 86.89 (main only)', `$${a.ownCost.toFixed(5)}`);
     check(near(a.ccusageCost, 87.44705, 0.01), 'ccusageCost = 87.45 (main + subagents)', `$${a.ccusageCost.toFixed(5)}`);
     check(near(a.trueCost, 116.16848, 0.01), 'trueCost = 116.17 (incl. workflow)', `$${a.trueCost.toFixed(5)}`);
@@ -109,15 +109,15 @@ async function main() {
   check(unPct < UNATTRIBUTED_TOLERANCE_PCT, `unattributed < ${UNATTRIBUTED_TOLERANCE_PCT}%`, `${unPct.toFixed(2)}% ($${un.toFixed(2)})`);
 
   console.log('\n7. Fast-mode premium is priced');
-  // A speed=fast message billed at the standard rate under-reports silently.
-  // costOf() records any such model; an empty set is the only healthy state.
-  // Left unguarded this cost 2.06% of the global total (165 messages, $33.04).
+  // 一則 speed=fast 的訊息若以標準費率計費，就會靜默地少報。
+  // costOf() 會把這種模型記錄下來；只有空集合才是健康狀態。
+  // 沒有這道防線的話，全域總額會少掉 2.06%（165 則訊息、$33.04）。
   const gaps = unknownFastModels();
   check(gaps.length === 0, 'every speed=fast model has a published premium', gaps.length ? `MISSING: ${gaps.join(', ')}` : `${ps.fastModelCount} models carry a premium`);
 
   console.log('\n8. Global reconciliation vs live ccusage  [GATE]');
   try {
-    // Snapshot ccusage fresh each run: totals drift as new usage lands.
+    // 每次執行都重新抓一次 ccusage 的快照：新的用量進來時總額會跟著變動。
     const totals = modelTotalsFromDaily(await ccusage.daily());
     const ours = all.reduce((s, x) => s + x.trueCost, 0);
     const delta = Math.abs(ours - totals.claudeCost);

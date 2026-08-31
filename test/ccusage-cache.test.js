@@ -45,7 +45,7 @@ describe('fullDaily — caching', () => {
     await fullDaily();
     await fullDaily();
     expect(ccusage.daily).toHaveBeenCalledTimes(1);
-    // Always the full corpus: no date range is ever passed down.
+    // 一律針對整份語料：絕不會把日期區間往下傳。
     expect(ccusage.daily).toHaveBeenCalledWith();
   });
 
@@ -87,7 +87,7 @@ describe('fullDaily — caching', () => {
     expect(await fullDaily()).toBe(first);
     vi.setSystemTime(Date.now() + CCUSAGE_SWR_MS + 1);
 
-    // The stale document comes back immediately — never a 4s wait.
+    // 過期的文件會立刻回來 —— 絕不會讓人等那 4 秒。
     expect(await fullDaily()).toBe(first);
     expect(ccusage.daily).toHaveBeenCalledTimes(2);
 
@@ -108,7 +108,7 @@ describe('fullDaily — caching', () => {
     await fullDaily();
     vi.setSystemTime(Date.now() + CCUSAGE_SWR_MS + 1);
     expect(await fullDaily()).toBe(first);
-    // A rejected background refresh must not become an unhandled rejection.
+    // 背景更新失敗時，不可以變成未處理的 rejection。
     await vi.waitFor(() => expect(ccusage.daily).toHaveBeenCalledTimes(2));
     expect(await fullDaily()).toBe(first);
   });
@@ -126,9 +126,9 @@ describe('fullDaily — caching', () => {
 });
 
 describe('cachedVersion', () => {
-  // A successful lookup is memoized for the life of the module, deliberately —
-  // ccusage's version cannot change while we run. So each test needs its own
-  // module instance rather than an ordering convention between them.
+  // 查詢成功的結果會被快取整個模組的生命週期，這是刻意的 ——
+  // ccusage 的版本在我們執行期間不可能改變。所以每個測試都需要自己的模組實例，
+  // 而不是靠測試之間的執行順序約定。
   let freshCachedVersion;
   beforeEach(async () => {
     vi.resetModules();
@@ -205,8 +205,8 @@ describe('monthlyFromDaily', () => {
 
   it('keeps ccusage own wire field names, not our internal token shape', () => {
     const [m] = monthlyFromDaily([day('2026-05-01', [bd('m')])]);
-    // Monthly rows are consumed as if they came from `ccusage monthly`, so the
-    // field names must match ccusage's, not aggregate.js's cacheWrite/cacheRead.
+    // 月資料列是被當成「來自 `ccusage monthly`」在使用的，所以欄位名稱必須與
+    // ccusage 一致，而不是 aggregate.js 的 cacheWrite/cacheRead。
     expect(Object.keys(m.modelBreakdowns[0]).sort()).toEqual([
       'cacheCreationTokens',
       'cacheReadTokens',
@@ -249,9 +249,8 @@ describe('monthlyFromDaily', () => {
   });
 
   it('keys off the dashed YYYY-MM-DD period ccusage emits in daily rows', () => {
-    // Not the compact YYYYMMDD form: filterDaily string-compares `period`
-    // against the YYYY-MM-DD bounds the UI sends, so a compact period would
-    // already break range filtering upstream of here.
+    // 不是緊湊的 YYYYMMDD 格式：filterDaily 是拿 `period` 去和 UI 送來的
+    // YYYY-MM-DD 邊界做字串比較，所以緊湊格式在這之前就已經把範圍篩選弄壞了。
     expect(monthlyFromDaily([day('2026-05-01'), day('2026-05-31')])).toHaveLength(1);
   });
 });

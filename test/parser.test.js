@@ -112,7 +112,7 @@ describe('isRealPrompt', () => {
   });
 
   it('keeps a skill command with no args tag at all', () => {
-    // <command-message> form: the args tag is present only when args were passed.
+    // <command-message> 這種形式：只有真的傳了參數時才會有 args 標籤。
     const t = '<command-message>code-review</command-message>\n<command-name>/code-review</command-name>';
     expect(isRealPrompt(userLine(t))).toBe(true);
   });
@@ -244,7 +244,7 @@ describe('readLines', () => {
 
   it('records an unreadable file in the shared collector rather than throwing', () => {
     const dir = tmp();
-    // Reading a directory as a file fails with EISDIR / EPERM, never ENOENT.
+    // 把目錄當成檔案讀會得到 EISDIR / EPERM，絕不會是 ENOENT。
     expect(readLines(dir)).toEqual([]);
     expect(getReadErrors()).toHaveLength(1);
     expect(getReadErrors()[0].file).toBe(dir);

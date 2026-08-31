@@ -8,9 +8,9 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const ROOT = path.resolve(__dirname, '..');
 
 /**
- * Verified during exploration as the only source of usage data on this machine:
- * ~/.config/claude does not exist, CLAUDE_CONFIG_DIR is unset, and the only other
- * .jsonl under ~/.claude is history.jsonl (no usage records).
+ * 探索階段已確認這是本機唯一的用量資料來源：~/.config/claude 不存在、
+ * CLAUDE_CONFIG_DIR 未設定，而 ~/.claude 底下其他的 .jsonl 只有
+ * history.jsonl（不含用量記錄）。
  */
 export const CLAUDE_PROJECTS_DIR =
   process.env.CLAUDE_CONFIG_DIR
@@ -18,19 +18,17 @@ export const CLAUDE_PROJECTS_DIR =
     : path.join(os.homedir(), '.claude', 'projects');
 
 /**
- * The desktop app's local agent mode (the scheduled tasks configured in its UI)
- * writes transcripts here instead of CLAUDE_PROJECTS_DIR, and ccusage does not
- * read this root either — see localagent.js.
+ * 桌面版的 local agent mode（在它 UI 裡設定的排程任務）把記錄寫在這裡，
+ * 不寫進 CLAUDE_PROJECTS_DIR，而且 ccusage 也不讀這個根目錄 —— 見 localagent.js。
  *
- * Claude Desktop ships as an MSIX package (Program Files\WindowsApps), so its
- * writes to %APPDATA%\claude are virtualised into the package's own container.
- * The container path is the real storage and any process can read it. The
- * %APPDATA%\claude view is NOT equivalent: measured on this machine, readdir
- * there returns ENOENT at medium integrity but lists 49 entries from an elevated
- * process. Reading %APPDATA% therefore made the whole feature silently empty for
- * every normal user — and invisible to us, because the dev shell was elevated.
+ * Claude Desktop 以 MSIX 套件形式安裝（Program Files\WindowsApps），所以它寫進
+ * %APPDATA%\claude 的內容會被虛擬化到套件自己的容器裡。容器路徑才是真正的儲存位置，
+ * 任何程序都讀得到。%APPDATA%\claude 這個視圖並不等價：本機實測，中完整性等級下
+ * readdir 會得到 ENOENT，但從提升權限的程序讀卻列出 49 個項目。也就是說，讀
+ * %APPDATA% 會讓這個功能對每個一般使用者都靜默地空掉 —— 而且我們還看不見，
+ * 因為開發用的 shell 是提升權限的。
  *
- * Prefer the container; fall back to %APPDATA% for a non-packaged install.
+ * 因此優先用容器路徑，非套件安裝才退回 %APPDATA%。
  */
 function resolveLocalAgentDir() {
   const leaf = ['claude', 'local-agent-mode-sessions'];
@@ -43,7 +41,7 @@ function resolveLocalAgentDir() {
       if (fs.existsSync(candidate)) return candidate;
     }
   } catch {
-    // no package container on this machine — fall through
+    // 這台機器沒有套件容器 —— 往下走
   }
   return path.join(process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'), ...leaf);
 }
@@ -51,30 +49,30 @@ function resolveLocalAgentDir() {
 export const LOCAL_AGENT_DIR = resolveLocalAgentDir();
 
 /**
- * "This is the packaged desktop build."
+ * 「這是打包後的桌面版」。
  *
- * Deliberately NOT just `process.versions.electron`: the server runs in a child
- * process now (electron/server-host.cjs), and what this flag gates — git
- * self-update, POST /api/update, the update download URL — is about how the app
- * was installed, not about which binary happens to be executing. electron/main.js
- * sets AITA_DESKTOP=1 when it forks; the versions check stays so `electron .`
- * against this repo still behaves as the desktop build.
+ * 刻意不只看 process.versions.electron：伺服器現在跑在子程序裡
+ * （electron/server-host.cjs），而這個旗標所控制的東西 —— git 自我更新、
+ * POST /api/update、更新下載網址 —— 取決於「這個 app 是怎麼安裝的」，
+ * 而不是「現在執行的是哪個二進位檔」。electron/main.js 在 fork 時會設
+ * AITA_DESKTOP=1；versions 檢查仍保留，好讓 `electron .` 直接跑這個 repo 時
+ * 依然被當成桌面版。
  */
 export const IS_DESKTOP = process.env.AITA_DESKTOP === '1' || Boolean(process.versions.electron);
 
-/** Overridable because ROOT is read-only inside a packaged Electron app (asar). */
+/** 可被覆寫，因為打包後的 Electron app 裡 ROOT 是唯讀的（asar）。 */
 export const CACHE_DIR = process.env.AITA_CACHE_DIR || path.join(ROOT, '.cache');
 export const PARSED_CACHE_FILE = path.join(CACHE_DIR, 'parsed.json');
 export const PRICES_CACHE_FILE = path.join(CACHE_DIR, 'prices.json');
 export const PRICES_SNAPSHOT_FILE = path.join(ROOT, 'prices.json');
 
-/** Bump to invalidate every cached rollup after a parser/attribution change. */
+/** 改動解析器或歸因邏輯後，調高這個數字即可讓所有既有快取失效。 */
 export const CACHE_VERSION = 3;
 
 export const PORT = Number(process.env.PORT) || 4317;
 export const HOST = '127.0.0.1';
 
-/** Public repo — used by the zip-mode update check (raw package.json + zip download). */
+/** 公開 repo —— zip 模式的更新檢查會用到（讀原始 package.json 與下載 zip）。 */
 export const REPO_URL = 'https://github.com/cs60811/AITokenAnalysis';
 
 export const LITELLM_PRICES_URL =
@@ -82,47 +80,44 @@ export const LITELLM_PRICES_URL =
 export const LITELLM_TIMEOUT_MS = 5000;
 
 /**
- * Second catalog, consulted only for fast-mode premiums.
+ * 第二份型錄，只為了查 fast 模式的加價倍率。
  *
- * LiteLLM has no speed dimension, so it cannot price a `/fast` message at all.
- * models.dev publishes it as `experimental.modes.fast` — the same source ccusage
- * reads — and we take only the ratio from it, leaving LiteLLM authoritative for
- * the absolute rates and the 5m/1h cache-write split.
+ * LiteLLM 沒有速度這個維度，所以它根本無法為一則 `/fast` 訊息定價。
+ * models.dev 把它放在 `experimental.modes.fast` —— 也正是 ccusage 讀的同一份來源 ——
+ * 我們只取倍率，絕對費率與 5m/1h 快取寫入的拆分仍以 LiteLLM 為準。
  */
 export const MODELSDEV_PRICES_URL = 'https://models.dev/api.json';
 
-/** Warn in the UI once the pricing snapshot is this old. */
+/** 定價快照超過這個天數就在 UI 上提醒。 */
 export const PRICES_STALE_DAYS = 30;
 
 /**
- * Global reconciliation gate: our claude-only total vs `ccusage daily`.
+ * 全域對帳閘門：我們的 claude 總額 vs `ccusage daily`。
  *
- * The two accounting gaps this tolerance used to absorb (partial writes of
- * streamed messages, and the advisor tier) are fixed, and the two totals now
- * agree to the cent. What is left is staleness: the dashboard compares a fresh
- * parse against a ccusage document up to CCUSAGE_SWR_MS old, so a burst of
- * spend inside that window shows up as drift. 1% covers that with room while
- * still catching a real regression — each of the two bugs above was ~1% alone.
+ * 這個容差原本要吸收的兩個記帳缺口（串流訊息的部分寫入、advisor 層）都已修好，
+ * 兩邊現在對到分。剩下的只有時間差：儀表板拿的是即時解析結果，比對的卻是最舊可到
+ * CCUSAGE_SWR_MS 的 ccusage 文件，所以在那個時間窗內爆量的支出會表現成偏差。
+ * 1% 足以涵蓋這個時間差還有餘裕，同時仍抓得到真正的迴歸 —— 上面那兩個 bug 每個
+ * 單獨就約 1%。
  */
 export const RECONCILE_TOLERANCE_PCT = 1;
 
-/** Fail if more than this share of cost cannot be tied back to a prompt. */
+/** 無法歸因回某個 prompt 的成本占比超過這個數字就算失敗。 */
 export const UNATTRIBUTED_TOLERANCE_PCT = 5;
 
 export const CCUSAGE_TIMEOUT_MS = 60_000;
 export const CCUSAGE_MAX_BUFFER = 1 << 28;
 
 /**
- * The export is one `daily --breakdown` document — measured at 22 KB for a full
- * year on this machine. It does not need the 256 MB ceiling the general path
- * carries, and the export endpoint is the one a user can fire repeatedly.
+ * 匯出的內容是一份 `daily --breakdown` 文件 —— 本機實測整年份約 22 KB。
+ * 它不需要一般路徑上那個 256 MB 的上限，而且匯出端點正好是使用者可以連續狂點的那一個。
  */
 export const CCUSAGE_EXPORT_MAX_BUFFER = 1 << 24;
 
 /**
- * The ccusage cache is fingerprint-invalidated for Claude transcripts, but ccusage
- * also reads other agents' logs (codex/gemini) the fingerprint can't see. A cached
- * document older than this is served stale and refreshed in the background.
+ * ccusage 快取對 Claude 的記錄是用指紋失效的，但 ccusage 同時也會讀其他 agent
+ * （codex／gemini）的記錄，那是指紋看不到的。因此文件超過這個時間就先回舊的，
+ * 同時在背景重新抓。
  */
 export const CCUSAGE_SWR_MS = 5 * 60_000;
 

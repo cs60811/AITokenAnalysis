@@ -11,7 +11,7 @@ import {
   PRICES_STALE_DAYS,
 } from './config.js';
 
-/** Rate fields we require to price a model. */
+/** 為一個模型定價所需要的費率欄位。 */
 const RATE_FIELDS = [
   'input_cost_per_token',
   'output_cost_per_token',
@@ -21,16 +21,16 @@ const RATE_FIELDS = [
 ];
 
 /**
- * Suffix marking the fast-mode variant of a model. Chosen to match the name
- * `ccusage` reports (claude-opus-5-fast) so the two agree row for row.
+ * 標記模型 fast 模式變體的後綴。刻意與 `ccusage` 回報的名稱一致
+ * （claude-opus-5-fast），這樣兩邊的每一列才對得起來。
  */
 const FAST_SUFFIX = '-fast';
 
 /**
- * The model a usage record actually bills as.
+ * 一筆 usage 記錄實際上以哪個模型計費。
  *
- * Idempotent, because it is applied both when minting byModel keys and again
- * inside costOf() on whatever key it is handed.
+ * 具冪等性，因為它既會在產生 byModel 的鍵時套用，也會在 costOf() 內部對傳進來的
+ * 任何鍵再套用一次。
  */
 export function billingModelOf(usage, model) {
   if (!model || usage?.speed !== 'fast' || model.endsWith(FAST_SUFFIX)) return model;
@@ -39,7 +39,7 @@ export function billingModelOf(usage, model) {
 
 let state = {
   rates: null,
-  /** model -> price multiplier for fast mode (see fetchFastMultipliers) */
+  /** model -> fast 模式的價格倍率（見 fetchFastMultipliers） */
   fastMultipliers: null,
   /** 'litellm' | 'cache' | 'snapshot' */
   source: null,
@@ -48,14 +48,13 @@ let state = {
 };
 
 /**
- * The only way state is replaced.
+ * 替換 state 的唯一途徑。
  *
- * scaledCache holds `<model>-fast` sheets derived from `state.rates` × the
- * published premium, so it is only valid for the rates it was built from.
- * Assigning state directly left it holding sheets scaled from the PREVIOUS
- * sheet — a fast model would keep billing at the old rate for the life of the
- * process. Only initPricing() happened to clear it; the cache and snapshot
- * fallbacks inside it, and loadSnapshotSync(), did not.
+ * scaledCache 存的是由 `state.rates` × 公布的加價倍率推導出來的 `<model>-fast`
+ * 費率表，所以它只對「當初推導它的那份費率」有效。以前直接指派 state，會讓它繼續
+ * 持有用「上一份」費率算出來的表 —— 於是 fast 模型在整個程序的生命週期裡都以舊費率
+ * 計費。當時只有 initPricing() 剛好會清它；它內部的 cache 與 snapshot fallback，
+ * 以及 loadSnapshotSync()，都不會。
  */
 function setState(next) {
   state = next;
@@ -63,27 +62,24 @@ function setState(next) {
 }
 
 /**
- * The rate a 1h cache write bills at, falling back to the 5m rate.
+ * 1 小時快取寫入的計費費率，找不到時退回 5 分鐘的費率。
  *
- * The fallback is the whole point: a model can publish
- * `cache_creation_input_token_cost` without the `_above_1hr` variant, and a 1h
- * write still has to bill at something. Lives here, in the module that owns
- * pricing, because aggregate.js recomputes cache-write cost from the same rate
- * sheet and MUST use the identical rule — three separate copies of this
- * expression is three chances for the improvement tab to disagree with the
- * total it is explaining.
+ * 這個 fallback 正是重點：模型可能只公布 `cache_creation_input_token_cost` 而沒有
+ * `_above_1hr` 版本，但 1 小時寫入還是得用某個價格計費。它放在這裡 —— 也就是負責
+ * 定價的模組 —— 因為 aggregate.js 會用同一份費率表重算快取寫入成本，而且「必須」
+ * 用完全相同的規則：把這個算式抄成三份，就是給了改善建議分頁三個機會去跟它正在
+ * 解釋的那個總額對不起來。
  */
 export function cacheWrite1hRateOf(rates) {
   return rates?.cache_creation_input_token_cost_above_1hr ?? rates?.cache_creation_input_token_cost ?? 0;
 }
 
 /**
- * Models seen billing at speed=fast that we had no multiplier for.
+ * 看到以 speed=fast 計費、但我們沒有對應倍率的模型。
  *
- * Never empty silently: such a message is charged at the standard rate, which
- * under-reports by whatever the premium is (2x on every model that publishes
- * one so far). verify() gates on this so a newly fast-capable model fails loudly
- * instead of quietly cheapening the total.
+ * 絕不會靜默地放過：這種訊息會以標準費率計費，等於少報了那個加價（目前有公布的
+ * 模型都是 2 倍）。verify() 會對這份清單設閘門，好讓新支援 fast 的模型「大聲地」
+ * 失敗，而不是悄悄把總額算便宜。
  */
 const unknownFast = new Set();
 export const unknownFastModels = () => [...unknownFast];
@@ -116,20 +112,18 @@ async function fetchLiteLLM() {
 }
 
 /**
- * Fast-mode price multipliers, keyed by model.
+ * fast 模式的價格倍率，以模型為鍵。
  *
- * Claude Code's fast mode (`/fast`) bills the same model at a premium and marks
- * every such message `usage.speed === "fast"`. LiteLLM does not model this at
- * all — it has no `claude-opus-5-fast` entry and no speed dimension — so on this
- * corpus 165 messages were billed at the standard rate and the global total came
- * out 2.06% under `ccusage daily`.
+ * Claude Code 的 fast 模式（`/fast`）會用加價對同一個模型計費，並在每則這類訊息上
+ * 標記 `usage.speed === "fast"`。LiteLLM 完全沒有建模這件事 —— 它沒有
+ * `claude-opus-5-fast` 這筆資料，也沒有速度這個維度 —— 所以在這份語料上有 165 則
+ * 訊息被以標準費率計費，全域總額比 `ccusage daily` 少了 2.06%。
  *
- * models.dev carries it as `experimental.modes.fast`, identified by exactly the
- * field we read from the transcript (`provider.body.speed === "fast"`). We take
- * only the ratio, not the absolute rates: LiteLLM is the authority on the 5m/1h
- * cache-write split that models.dev has no concept of, and the premium is
- * uniform across input/output/read/write on every model that publishes one
- * (verified: opus-4-8 and opus-5 are 2.00x on all four).
+ * models.dev 把它放在 `experimental.modes.fast`，判斷依據正是我們從記錄裡讀的
+ * 同一個欄位（`provider.body.speed === "fast"`）。我們只取「比值」，不取絕對費率：
+ * models.dev 沒有 5m/1h 快取寫入拆分的概念，那部分以 LiteLLM 為準；而目前每個有
+ * 公布加價的模型，其 input/output/read/write 四項的倍率都一致
+ * （已驗證：opus-4-8 與 opus-5 四項皆為 2.00 倍）。
  */
 async function fetchFastMultipliers() {
   const ctrl = new AbortController();
@@ -157,37 +151,37 @@ async function readJson(file) {
   return JSON.parse(await fsp.readFile(file, 'utf8'));
 }
 
-/** Last good multipliers on disk, for when models.dev is briefly unreachable. */
+/** 磁碟上最後一份可用的倍率，供 models.dev 短暫連不上時使用。 */
 async function diskFastMultipliers() {
   for (const file of [PRICES_CACHE_FILE, PRICES_SNAPSHOT_FILE]) {
     try {
       const doc = await readJson(file);
       if (doc?.fastMultipliers && Object.keys(doc.fastMultipliers).length) return doc.fastMultipliers;
     } catch {
-      // try the next file
+      // 試下一個檔案
     }
   }
   return null;
 }
 
 /**
- * Resolve pricing once at startup: LiteLLM -> on-disk cache -> bundled snapshot.
- * Never throws; on total failure `state.rates` stays null and costOf() returns null,
- * which the UI renders as "—" rather than a misleading $0.
+ * 啟動時解析一次定價：LiteLLM -> 磁碟快取 -> 內建快照。
+ * 絕不拋錯；全部失敗時 `state.rates` 維持 null，costOf() 回傳 null，
+ * UI 會顯示成「—」而不是誤導人的 $0。
  */
 export async function initPricing() {
   resetUnknownFastModels();
-  // Independent of the rate fetch: a models.dev outage must not cost us LiteLLM
-  // rates, and vice versa. A missing multiplier surfaces through unknownFast.
+  // 與費率抓取彼此獨立：models.dev 掛掉不該害我們拿不到 LiteLLM 的費率，反之亦然。
+  // 缺少倍率這件事會透過 unknownFast 浮出來。
   let fastMultipliers = null;
   try {
     fastMultipliers = await fetchFastMultipliers();
   } catch (err) {
     state.error = `models.dev fetch failed: ${err.message}`;
   }
-  // Observed in testing: one timed-out fetch and every fast message silently
-  // reverts to half price. The premium changes far more slowly than the catalog
-  // is fetched, so the last good copy is a much better answer than none.
+  // 測試時實際遇過：一次逾時的抓取，就讓每則 fast 訊息靜默地變成半價。
+  // 加價倍率的變動速度遠比我們抓型錄的頻率慢，所以「最後一份可用的副本」
+  // 遠比「沒有」要好得多。
   fastMultipliers ??= await diskFastMultipliers();
 
   try {
@@ -217,7 +211,7 @@ export async function initPricing() {
       const doc = await readJson(file);
       setState({
         rates: doc.rates ?? doc,
-        // A live models.dev still wins over a stale on-disk copy.
+        // 即時抓到的 models.dev 仍然優先於磁碟上過期的副本。
         fastMultipliers: fastMultipliers ?? doc.fastMultipliers ?? null,
         source,
         fetchedAt: doc.fetchedAt ?? null,
@@ -225,7 +219,7 @@ export async function initPricing() {
       });
       return state;
     } catch {
-      // try the next fallback
+      // 試下一個 fallback
     }
   }
   return state;
@@ -249,14 +243,13 @@ export function pricingStatus() {
 }
 
 /**
- * Fast mode is modelled as a virtual model `<base>-fast` — the name ccusage also
- * reports. Its rates are the base sheet scaled by the published premium, so every
- * consumer (cost, the 5m/1h cache-write split, the rate columns in the improvement
- * tab) stays consistent without needing to know fast mode exists.
+ * fast 模式被建模成一個虛擬模型 `<base>-fast` —— 也是 ccusage 回報的名稱。
+ * 它的費率是基礎費率表乘上公布的加價倍率，如此一來每個使用者（成本計算、
+ * 5m/1h 快取寫入拆分、改善建議分頁的費率欄）都能保持一致，而不需要知道
+ * fast 模式的存在。
  *
- * With no published premium we bill the BASE rate rather than dropping the
- * message: base is a floor, $0 would be a lie. The model is recorded so that
- * verify fails loudly instead of the total quietly cheapening.
+ * 沒有公布加價倍率時，我們以「基礎費率」計費，而不是把訊息丟掉：基礎費率是下限，
+ * $0 則是謊話。該模型會被記錄下來，好讓 verify 大聲地失敗，而不是讓總額悄悄變便宜。
  */
 const scaledCache = new Map();
 
@@ -280,28 +273,26 @@ export function hasRates(model) {
   return ratesFor(model) != null;
 }
 
-/** Price multiplier for one model in fast mode, or null when unpublished. */
+/** 單一模型在 fast 模式的價格倍率；未公布時回傳 null。 */
 export function fastMultiplierFor(model) {
   const m = state.fastMultipliers?.[model];
   return typeof m === 'number' && m > 0 ? m : null;
 }
 
 /**
- * Cost of one assistant message.
+ * 單一則 assistant 訊息的成本。
  *
- * This formula was verified against ccusage to 8 decimal places on session
- * ced37f19 (opus 85.52876450, sonnet 1.36267350). The 5m/1h cache-creation
- * split matters: a 1h write costs ~2x input, a 5m write ~1.25x.
+ * 這個公式已在 session ced37f19 上與 ccusage 驗證到小數點後 8 位
+ * （opus 85.52876450、sonnet 1.36267350）。5m/1h 的快取建立拆分很重要：
+ * 1 小時寫入約為 input 的 2 倍，5 分鐘寫入約 1.25 倍。
  *
- * `usage.speed === "fast"` resolves to the `<model>-fast` rate sheet, which
- * already carries the premium — there is no multiplier here to forget. The key is
- * resolved per billable part, not per transcript line, which is what keeps the
- * advisor tier correct: an `advisor_message` iteration inside a fast message
- * carries no `speed` of its own and ccusage does not charge it the premium either
- * (measured: the one such iteration on this corpus is $0.85, an order of magnitude
- * above the $0.08 residual the reconciliation lands on).
+ * `usage.speed === "fast"` 會解析到 `<model>-fast` 那份費率表，而它「已經」含了
+ * 加價 —— 這裡沒有額外的倍率會被忘記乘。鍵是「逐一可計費部分」解析的，不是逐行解析，
+ * 這正是讓 advisor 層保持正確的關鍵：fast 訊息內部的 `advisor_message` 迭代本身
+ * 不帶 `speed`，而 ccusage 也同樣不對它收加價（實測：本語料唯一一筆這種迭代是 $0.85，
+ * 比對帳最後落在的 $0.08 殘差高了一個數量級）。
  *
- * Returns null for an unpriced model so callers can render "—" instead of $0.
+ * 無法定價的模型回傳 null，好讓呼叫端顯示「—」而不是 $0。
  */
 export function costOf(usage, model) {
   const p = ratesFor(billingModelOf(usage, model));
@@ -321,20 +312,19 @@ export function costOf(usage, model) {
 }
 
 /**
- * The (model, usage) pairs one transcript entry bills for — usually just itself.
+ * 一筆記錄項目實際要計費的 (model, usage) 組合 —— 通常就只有它自己。
  *
- * A high-effort turn consults an advisor model and records that request as an
- * extra `usage.iterations[]` entry of type `advisor_message`, carrying its own
- * `model`. Those tokens are NOT in the top-level usage: verified on all 15,030
- * iteration-carrying entries here, the top level equals the sum of the
- * non-advisor iterations exactly. ccusage bills the advisor; missing it
- * under-reported our total by 1.03%, all of it opus.
+ * 高強度的 turn 會諮詢 advisor 模型，並把那次請求記成 `usage.iterations[]` 裡
+ * 額外一筆 type 為 `advisor_message` 的項目，帶著它自己的 `model`。這些 token
+ * 「不在」頂層 usage 裡：本機 15,030 筆帶 iterations 的項目全部驗證過，頂層的數字
+ * 恰好等於非 advisor 迭代的總和。ccusage 會對 advisor 計費；漏掉它會讓我們的總額
+ * 少報 1.03%，而且全部都是 opus。
  */
 export function billableParts(usage, model) {
   const parts = [{ model: billingModelOf(usage, model), usage }];
   for (const it of usage?.iterations ?? []) {
-    // Per part, not per line: an advisor iteration inside a fast message carries
-    // no speed of its own, and ccusage does not charge it the premium either.
+    // 逐一部分、而非逐行判斷：fast 訊息內部的 advisor 迭代本身不帶 speed，
+    // 而 ccusage 也同樣不對它收加價。
     if (it?.type === 'advisor_message') {
       parts.push({ model: billingModelOf(it, it.model ?? model), usage: it });
     }
@@ -342,7 +332,7 @@ export function billableParts(usage, model) {
   return parts;
 }
 
-/** Break a usage record into the four token classes the UI must show separately. */
+/** 把一筆 usage 記錄拆成 UI 必須分開顯示的幾種 token 類別。 */
 export function tokensOf(usage) {
   const cc = usage?.cache_creation ?? {};
   return {
@@ -354,17 +344,17 @@ export function tokensOf(usage) {
   };
 }
 
-/** Write the current LiteLLM rates for our models to the bundled snapshot. */
+/** 把目前 LiteLLM 上我們用到的模型費率寫進內建快照。 */
 export async function writeSnapshot(models) {
   if (!state.rates) throw new Error('no rates loaded');
   const rates = {};
   const fastMultipliers = {};
   for (const model of models) {
-    // byModel now yields fast keys too; the snapshot stores the real model plus
-    // its premium, and ratesFor() reconstitutes the variant from those two.
+    // byModel 現在也會產生 fast 的鍵；快照存的是真實模型加上它的加價倍率，
+    // ratesFor() 再從這兩者還原出變體。
     const m = model.endsWith(FAST_SUFFIX) ? model.slice(0, -FAST_SUFFIX.length) : model;
     if (state.rates[m]) rates[m] = state.rates[m];
-    // Ship the premium too, or the offline desktop build under-reports fast mode.
+    // 加價倍率也要一起打包，否則離線的桌面版會少報 fast 模式的成本。
     if (state.fastMultipliers?.[m]) fastMultipliers[m] = state.fastMultipliers[m];
   }
   const doc = { fetchedAt: state.fetchedAt ?? new Date().toISOString(), rates, fastMultipliers };
@@ -372,7 +362,7 @@ export async function writeSnapshot(models) {
   return Object.keys(rates).length;
 }
 
-/** Load a snapshot synchronously — used by unit tests that skip initPricing(). */
+/** 同步載入快照 —— 供跳過 initPricing() 的單元測試使用。 */
 export function loadSnapshotSync() {
   const doc = JSON.parse(fs.readFileSync(PRICES_SNAPSHOT_FILE, 'utf8'));
   setState({

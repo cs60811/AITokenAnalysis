@@ -11,7 +11,7 @@ vi.mock('../src/config.js', () => ({
   IS_DESKTOP: false,
 }));
 
-/** Captured execFile calls, and what the next one should do. */
+/** 攔截到的 execFile 呼叫，以及下一次呼叫該有什麼行為。 */
 const calls = [];
 let behaviour = { stdout: '{}' };
 
@@ -42,7 +42,7 @@ beforeEach(() => {
 afterEach(() => vi.restoreAllMocks());
 
 const lastArgs = () => calls.at(-1).args;
-/** ccusage's own args, with the resolver's leading cli.js path (if any) dropped. */
+/** ccusage 自己的參數，並把解析器加在最前面的 cli.js 路徑（若有）去掉。 */
 const ccusageArgs = () => {
   const args = lastArgs();
   return args[0]?.endsWith('.js') || args[0]?.endsWith('.mjs') ? args.slice(1) : args;
@@ -51,8 +51,7 @@ const ccusageArgs = () => {
 describe('spawn safety', () => {
   it('never uses a shell, and always hides the window with a timeout', async () => {
     await daily();
-    // shell:true would trigger Node's DEP0190 and open a command-injection path
-    // for the date arguments.
+    // shell:true 會觸發 Node 的 DEP0190，並替日期參數開出一條命令注入的路。
     expect(calls[0].opts).toMatchObject({
       shell: false,
       windowsHide: true,
@@ -261,8 +260,8 @@ describe('modelTotalsFromDaily', () => {
   });
 
   it('uses our internal token names, not ccusage wire names', () => {
-    // aggregate.js and the overview card read cacheWrite/cacheRead; the wire
-    // names (cacheCreationTokens/cacheReadTokens) stop here.
+    // aggregate.js 與總覽卡片讀的是 cacheWrite/cacheRead；
+    // 原始欄位名（cacheCreationTokens/cacheReadTokens）到這裡為止。
     const r = modelTotalsFromDaily({ daily: [{ modelBreakdowns: [bd('m')] }] });
     expect(Object.keys(r.models[0]).sort()).toEqual([
       'cacheRead',

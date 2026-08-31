@@ -29,8 +29,8 @@ describe('projectLabelFromDirName', () => {
   });
 
   it('keeps a hyphenated project name intact rather than splitting on -', () => {
-    // The encoding replaces separators AND literal hyphens with '-', so a naive
-    // split would turn "…repos-MS-Web" into "Web".
+    // 這個編碼會把分隔符「和」原本就存在的連字號都換成 '-'，
+    // 所以天真地用它去切，會把 "…repos-MS-Web" 變成 "Web"。
     expect(projectLabelFromDirName('C--Users-me-source-repos-MS-Web')).toBe('MS-Web');
   });
 
@@ -82,8 +82,8 @@ describe('discoverSessions', () => {
     expect([...wf.keys()].sort()).toEqual(['wf_abc', 'wf_xyz']);
     expect(wf.get('wf_abc').sort()).toEqual([w1, w2].sort());
     expect(wf.get('wf_xyz')).toEqual([w3]);
-    // The workflow tier must never leak into the subagent tier: ccusage counts
-    // subagents and silently drops workflows, so the split has to survive.
+    // workflow 那一層絕不能漏進 subagent 那一層：ccusage 會算 subagent 卻靜默地
+    // 漏掉 workflow，所以這個區分必須保住。
     expect(discoverSessions().get(SID).subagents).toEqual([]);
   });
 
@@ -111,8 +111,8 @@ describe('discoverSessions', () => {
     touch('proj-a', 'README.md');
     touch('proj-a', SID, 'subagents', 'notes.txt');
     touch('proj-a', SID, 'subagents', 'workflows', 'wf_a', 'notes.txt');
-    // The record exists because subagents/ does, but every tier is empty — and
-    // analyzeAll drops exactly that shape, so it never reaches the dashboard.
+    // 這筆記錄之所以存在，是因為 subagents/ 存在，但每一層都是空的 ——
+    // 而 analyzeAll 正好會把這種形狀丟掉，所以它永遠不會出現在儀表板上。
     const s = discoverSessions().get(SID);
     expect(s.main).toBeNull();
     expect(s.subagents).toEqual([]);

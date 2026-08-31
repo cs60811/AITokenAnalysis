@@ -5,7 +5,7 @@ const SCAN_TTL_MS = 1000;
 
 vi.mock('../src/config.js', () => ({ CACHE_VERSION }));
 
-/** A fake corpus: session id -> { size, mtimeMs } per file. */
+/** 假的語料：session id -> 每個檔案的 { size, mtimeMs }。 */
 let corpus = new Map();
 const discoverSessions = vi.fn(() => corpus);
 const allFilesOf = vi.fn((s) => s.files);
@@ -125,7 +125,7 @@ describe('getAnalysis — memoization', () => {
 
   it('copies the read errors, so a later collector push cannot mutate the memo', () => {
     readErrors = [{ file: 'x.jsonl', code: 'EPERM' }];
-    // resetReadErrors() runs before analyzeAll, so seed inside the analysis.
+    // resetReadErrors() 會在 analyzeAll 之前執行，所以要在分析「之內」種進去。
     analyzeAll.mockImplementationOnce(() => {
       readErrors = [{ file: 'x.jsonl', code: 'EPERM' }];
       return [];
@@ -140,8 +140,8 @@ describe('getAnalysis — memoization', () => {
 
 describe('the shared scan', () => {
   it('shares one scan across a burst inside the TTL', () => {
-    // A refresh fires nine parallel tab requests; they must agree on one
-    // fingerprint, or each one misses the memo and re-parses the whole corpus.
+    // 一次重新整理會觸發九個並行的分頁請求；它們必須對同一個指紋達成共識，
+    // 否則每一個都會沒命中快取，各自把整份語料重新解析一遍。
     for (let i = 0; i < 9; i++) getAnalysis();
     expect(discoverSessions).toHaveBeenCalledTimes(1);
     expect(analyzeAll).toHaveBeenCalledTimes(1);
@@ -157,8 +157,8 @@ describe('the shared scan', () => {
   });
 
   it('restarts the TTL clock from the END of a parse', () => {
-    // The parse itself outlives the TTL, so without re-stamping, the very next
-    // request of the same burst would rescan and could parse all over again.
+    // 解析本身耗時超過 TTL，所以若不重新打時間戳，同一叢請求裡的下一個就會
+    // 重新掃描，甚至可能整個再解析一次。
     analyzeAll.mockImplementationOnce(() => {
       vi.setSystemTime(Date.now() + SCAN_TTL_MS * 5);
       return [];

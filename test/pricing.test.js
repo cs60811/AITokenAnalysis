@@ -8,9 +8,8 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const FIXTURE = path.join(HERE, 'fixtures', 'prices.fixture.json');
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'aita-pricing-'));
 
-// Pricing reads its snapshot/cache paths from config at module load. Point them
-// at a fixture with a known rate sheet so the cost assertions are exact numbers
-// rather than whatever the shipped prices.json happens to hold today.
+// pricing 會在模組載入時從 config 讀取快照／快取的路徑。把它們指向一份費率已知的
+// 測試資料，好讓成本斷言是精確數字，而不是隨著今天出貨的 prices.json 內容而變。
 vi.mock('../src/config.js', () => ({
   CACHE_DIR: TMP,
   PRICES_CACHE_FILE: path.join(TMP, 'prices-cache.json'),
@@ -42,8 +41,8 @@ const RATES = JSON.parse(fs.readFileSync(FIXTURE, 'utf8'));
 const CACHE = path.join(TMP, 'prices-cache.json');
 
 beforeEach(() => {
-  // Globally, not per-block: initPricing WRITES this file on a successful fetch,
-  // so one test's success silently became the next test's fallback rate sheet.
+  // 放在全域而不是各區塊：initPricing 在抓取成功時會「寫入」這個檔案，
+  // 所以某個測試的成功會靜默地變成下一個測試的備援費率表。
   fs.rmSync(CACHE, { force: true });
   loadSnapshotSync();
   resetUnknownFastModels();
@@ -91,7 +90,7 @@ describe('ratesFor', () => {
   });
 
   it('bills a fast model with no published premium at the BASE rate, not $0', () => {
-    // A floor is honest; $0 would be a lie. The model is recorded so verify fails.
+    // 用下限是誠實的；$0 則是謊話。該模型會被記錄下來，好讓 verify 失敗。
     expect(ratesFor('test-no1h-fast')).toEqual(RATES.rates['test-no1h']);
     expect(unknownFastModels()).toContain('test-no1h');
   });
@@ -127,9 +126,9 @@ describe('cacheWrite1hRateOf', () => {
 
 describe('scaled -fast sheets are invalidated with the rate sheet', () => {
   it('does not serve a -fast sheet scaled from a superseded rate sheet', async () => {
-    // Regression: scaledCache was only cleared at the top of initPricing, so the
-    // cache/snapshot fallbacks inside it — and loadSnapshotSync — swapped the
-    // rates out from under sheets already derived from the old ones.
+    // 迴歸測試：scaledCache 以前只在 initPricing 的開頭被清除，所以它內部的
+    // cache／snapshot fallback —— 以及 loadSnapshotSync —— 會在「已經用舊費率
+    // 推導出來的表」底下把費率抽換掉。
     expect(ratesFor('test-opus-fast').input_cost_per_token).toBeCloseTo(0.00002, 12);
 
     vi.stubGlobal('fetch', async (url) => ({
@@ -181,7 +180,7 @@ describe('costOf', () => {
   });
 
   it('bills a 1h cache write at the 5m rate when the model has no 1h rate', () => {
-    // The 1h fallback: 400 * 1.25e-5 instead of 400 * 2e-5.
+    // 1 小時的 fallback：變成 400 * 1.25e-5 而不是 400 * 2e-5。
     expect(costOf(usage, 'test-no1h')).toBeCloseTo(0.01 + 0.05 + 0.025 + 0.005 + 0.01, 12);
   });
 
@@ -274,13 +273,13 @@ describe('pricingStatus', () => {
     expect(s.source).toBe('snapshot');
     expect(s.modelCount).toBe(Object.keys(RATES.rates).length);
     expect(s.fastModelCount).toBe(1);
-    expect(s.stale).toBe(true); // the fixture is dated 2026-01-01
+    expect(s.stale).toBe(true); // 這份測試資料的日期是 2026-01-01
     expect(s.ageDays).toBeGreaterThan(30);
   });
 
   it('surfaces the models seen billing fast with no published premium', async () => {
-    // Via initPricing, not loadSnapshotSync: only the former clears the scaled
-    // -fast cache, and a cache hit skips the unknownFast bookkeeping entirely.
+    // 走 initPricing 而不是 loadSnapshotSync：只有前者會清掉已縮放的 -fast 快取，
+    // 而一旦命中快取，就會完全跳過 unknownFast 的記錄動作。
     vi.stubGlobal('fetch', async () => {
       throw new Error('offline');
     });
@@ -421,7 +420,7 @@ describe('writeSnapshot', () => {
     const out = path.join(TMP, 'written.json');
     const cfg = await import('../src/config.js');
     const original = cfg.PRICES_SNAPSHOT_FILE;
-    // writeSnapshot writes to PRICES_SNAPSHOT_FILE; redirect it for this one test.
+    // writeSnapshot 會寫進 PRICES_SNAPSHOT_FILE；這個測試把它導向別處。
     vi.spyOn(fs.promises, 'writeFile').mockImplementation(async (_file, body) => {
       fs.writeFileSync(out, body);
     });

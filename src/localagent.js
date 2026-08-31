@@ -5,53 +5,51 @@ import { isBillable, readLines, textOf } from './parser.js';
 import { billableParts, costOf, hasRates, tokensOf } from './pricing.js';
 
 /**
- * Spend that neither ccusage nor the main analysis can see.
+ * ccusage 和主分析都看不到的支出。
  *
- * The desktop app's local agent mode — the scheduled tasks you set up in the UI —
- * keeps its transcripts under %APPDATA%\claude\local-agent-mode-sessions, not in
- * CLAUDE_PROJECTS_DIR. ccusage does not read that root either: our claude-only
- * total reconciles to `ccusage daily` to the cent while these runs sit outside
- * both. Verified on this machine: of 483 message ids here, 0 also appear in
- * ~/.claude/projects, so nothing here is a duplicate of the counted corpus.
+ * 桌面版的 local agent mode —— 也就是你在 UI 裡設定的排程任務 —— 把記錄放在
+ * %APPDATA%\claude\local-agent-mode-sessions，不在 CLAUDE_PROJECTS_DIR 底下。
+ * ccusage 也不讀那個根目錄：我們的 claude 總額和 `ccusage daily` 對帳到分，
+ * 而這些執行紀錄卻在兩者之外。本機已驗證：這裡的 483 個 message id 中，
+ * 有 0 個同時出現在 ~/.claude/projects，所以這裡沒有任何一筆是既有語料的重複。
  *
- * Deliberately kept OUT of the global total: the reconciliation gate compares our
- * number against ccusage's, and folding in spend ccusage cannot see would turn
- * that gate into permanent noise. It is reported as its own figure instead.
+ * 刻意「不」計入全域總額：對帳閘門是拿我們的數字去比 ccusage 的，
+ * 把 ccusage 根本看不到的支出加進去，只會讓那道閘門永遠有雜訊。
+ * 因此它是以獨立的數字呈現。
  */
 
 /**
- * Every run writes its messages twice — once to `audit.jsonl`, once to the
- * nested `.claude/projects/**` transcript — and the audit copy carries no
- * `requestId`, so the shared dedupKey() would fall back to uuid and count both.
- * `message.id` is present on every line of both copies and is stable across
- * them, so it is the key here. (Left local to this module: the main corpus has
- * no id-without-requestId lines, and loosening the shared key there could
- * collapse genuinely distinct retries.)
+ * 每次執行都會把訊息寫兩份 —— 一份到 `audit.jsonl`，一份到巢狀的
+ * `.claude/projects/**` 記錄 —— 而 audit 那份「沒有」`requestId`，
+ * 所以共用的 dedupKey() 會退化成用 uuid，導致兩份都被計算。
+ * `message.id` 在兩份副本的每一行都有，而且跨副本穩定，因此這裡改用它當鍵。
+ * （刻意只留在這個模組：主語料沒有「有 id 卻沒有 requestId」的行，
+ * 而把共用的鍵放寬，可能會把真正不同的重試合併掉。）
  */
 const keyOf = (line) => (line.message?.id ? `id:${line.message.id}` : `uuid:${line.uuid}`);
 
-/** Automated runs open with `<scheduled-task name="…" …>`. */
+/** 自動執行的任務以 `<scheduled-task name="…" …>` 開頭。 */
 const SCHEDULED_TASK_RE = /<scheduled-task\s+name="([^"]+)"/;
 const MANUAL = '（手動執行）';
 
-/** The `local_<uuid>` directory that identifies one scheduled-task run. */
+/** `local_<uuid>` 目錄用來識別一次排程任務的執行。 */
 const RUN_DIR_PREFIX = 'local_';
 const AUDIT_FILE = 'audit.jsonl';
 const JSONL_EXT = '.jsonl';
 const UNKNOWN_RUN = '(unknown)';
 
-/** Enough of the prompt to recognise the run by, in a table cell. */
+/** 擷取足以在表格欄位中辨識該次執行的 prompt 長度。 */
 const PROMPT_LABEL_CHARS = 90;
 
 /**
- * Subdirectories of `dir`, or [] when there are none.
+ * `dir` 底下的子目錄；沒有的話回傳 []。
  *
- * ENOENT is expected everywhere here — most machines have no local agent mode,
- * and a run need not have a `.claude/projects`. Anything else (a permission
- * error, a exhausted handle table) is NOT expected, and swallowing it turns
- * "I could not read this" into "there is nothing here", which silently removes
- * the whole feature from the dashboard. Observed exactly that: one long-running
- * server reported 0 runs while a fresh one on the same path reported 16.
+ * 這裡到處都預期會遇到 ENOENT —— 大多數機器沒有 local agent mode，
+ * 而且一次執行也不一定會有 `.claude/projects`。但其他錯誤（權限問題、
+ * 檔案代號用盡）就「不」在預期內，把它吞掉等於把「我讀不到這個」變成
+ * 「這裡什麼都沒有」，會讓整個功能從儀表板上靜默消失。
+ * 實際觀察到過：一台長時間執行的伺服器回報 0 筆執行，而同一路徑上新啟動的
+ * 伺服器卻回報 16 筆。
  */
 const dirsIn = (dir) => {
   try {
@@ -66,32 +64,29 @@ const dirsIn = (dir) => {
 };
 
 /**
- * What the last scan actually saw, reported in the payload.
+ * 上一次掃描實際看到了什麼，會一併放進回傳資料裡。
  *
- * Without this, every failure mode collapses into the same blank card and the
- * only way to tell them apart is to attach a debugger to a machine you may not
- * have. `rootEntries: 0` means the root is not there (or not readable as a
- * directory); `files: 32, filesRead: 0` means we found the transcripts and
- * could not open them — two completely different problems, one glance apart.
+ * 沒有這個，所有失敗情境都會塌縮成同一張空白卡片，而唯一能區分它們的方法，
+ * 是去一台你可能根本碰不到的機器上掛偵錯器。`rootEntries: 0` 代表根目錄不存在
+ * （或無法當成目錄讀取）；`files: 32, filesRead: 0` 則代表我們找到了記錄檔卻打不開 ——
+ * 這是兩個完全不同的問題，而現在一眼就能分辨。
  *
- * `readErrors` is our own collector, kept out of parser.js's module-level one:
- * that array belongs to the transcript analysis and gets memoized into it, so a
- * failure here used to surface on the health card as if ~/.claude/projects had
- * failed to read.
+ * `readErrors` 是我們自己的收集器，刻意不用 parser.js 那個模組層級的：
+ * 那個陣列屬於記錄分析，而且會被一起記憶進快取，所以這裡的失敗以前會顯示在
+ * 健康狀態卡上，看起來就像 ~/.claude/projects 讀取失敗一樣。
  */
 const emptyScan = () => ({ rootEntries: 0, files: 0, filesRead: 0, billableLines: 0, readErrors: [] });
 let lastScan = emptyScan();
 
 /**
- * The two spots a run keeps transcripts, both verified on this machine (16 files
- * each, no other shape):
+ * 一次執行會把記錄放在兩個固定位置，兩者都已在本機驗證（各 16 個檔案，沒有其他形狀）：
  *   <run>/audit.jsonl
- *   <run>/.claude/projects/<encoded-cwd>/<sid>.jsonl
+ *   <run>/.claude/projects/<編碼過的 cwd>/<sid>.jsonl
  *
- * Enumerated rather than walked on purpose: each run also carries a copy of the
- * skill bundles (docx/pptx/xlsx), so a recursive walk crosses ~430 directories
- * and costs ~85ms — on every request, since this runs behind /api/overview.
- * Reaching straight for the two known spots costs ~2ms.
+ * 刻意用列舉而不是遞迴走訪：每次執行還會附帶一份 skill 套件的副本
+ * （docx/pptx/xlsx），所以遞迴走訪要跨約 430 個目錄、耗時約 85ms ——
+ * 而且是「每個請求」都要付這個代價，因為這段跑在 /api/overview 後面。
+ * 直接讀那兩個已知位置只要約 2ms。
  */
 function transcriptsOfRun(run) {
   const out = [];
@@ -105,7 +100,7 @@ function transcriptsOfRun(run) {
   return out;
 }
 
-/** The `local_*` run directories under the root, across every workspace and conversation. */
+/** 根目錄底下所有 workspace 與 conversation 中的 `local_*` 執行目錄。 */
 function runDirs() {
   const workspaces = dirsIn(LOCAL_AGENT_DIR);
   const out = [];
@@ -126,7 +121,7 @@ function transcriptFiles() {
   return out;
 }
 
-/** The `local_<uuid>` path segment identifies one scheduled-task run. */
+/** 路徑中的 `local_<uuid>` 片段用來識別一次排程任務的執行。 */
 const runOf = (file) =>
   path.relative(LOCAL_AGENT_DIR, file).split(path.sep).find((s) => s.startsWith(RUN_DIR_PREFIX)) ?? UNKNOWN_RUN;
 
@@ -147,11 +142,11 @@ function fingerprint(files) {
   return parts.join('|');
 }
 
-/* ── parsing ──────────────────────────────────────────────────────────────── */
+/* ── 解析 ─────────────────────────────────────────────────────────────────── */
 
 const emptyTokens = () => ({ input: 0, output: 0, cacheWrite: 0, cacheRead: 0 });
 
-/** Cost and tokens of one billable line, skipping any part we cannot price. */
+/** 單一可計費行的成本與 token，無法定價的部分一律跳過。 */
 function priceLine(line) {
   let cost = 0;
   const tokens = emptyTokens();
@@ -170,11 +165,10 @@ function priceLine(line) {
 const newRunMeta = () => ({ task: null, prompt: null, models: new Set() });
 
 /**
- * Name a run from its first human-visible user line.
+ * 用第一行人類看得到的 user 內容來為一次執行命名。
  *
- * Automated runs open with the task envelope; the ones you set up by hand open
- * with what you typed. Both are worth naming in the UI, so the first of each
- * kind wins and later lines do not overwrite it.
+ * 自動執行的任務以任務外框開頭；手動設定的則以你輸入的內容開頭。
+ * 兩者在 UI 上都值得標示出來，所以各取第一個出現的，後面的行不會覆蓋掉它。
  */
 function noteUserLine(meta, line) {
   if (line.type !== 'user' || line.isMeta || line.isSidechain) return;
@@ -185,12 +179,10 @@ function noteUserLine(meta, line) {
 }
 
 /**
- * Read every transcript once: the priced messages keyed for dedup, and the
- * per-run naming metadata.
+ * 把每份記錄讀過一次：取得已定價並附上去重鍵的訊息，以及各次執行的命名中繼資料。
  *
- * Messages are priced at the larger of the two recorded copies — they differ on
- * 443 of 478 shared messages because each copy is written while the response is
- * still streaming, and the complete one is the one that was billed.
+ * 訊息會以兩份副本中「較大」的那份定價 —— 478 則共有的訊息裡有 443 則兩份不一致，
+ * 因為每份副本都是在回應還在串流時就寫下的，而完整的那份才是實際被計費的那份。
  */
 function readMessages(files) {
   const byKey = new Map();
@@ -226,7 +218,7 @@ function readMessages(files) {
 
 const totalTokensOf = (t) => t.input + t.output + t.cacheWrite + t.cacheRead;
 
-/** Deduped messages folded into one entry per run, oldest run first. */
+/** 把去重後的訊息彙整成每次執行一筆，最舊的執行排前面。 */
 function rollUpRuns(byKey, meta) {
   const runs = new Map();
   for (const m of byKey.values()) {
@@ -255,13 +247,13 @@ function rollUpRuns(byKey, meta) {
     .sort((a, z) => String(a.firstTs).localeCompare(String(z.firstTs)));
 }
 
-/** One entry per run: { run, day, firstTs, cost, tokens, messages, task, prompt, models }. */
+/** 每次執行一筆：{ run, day, firstTs, cost, tokens, messages, task, prompt, models }。 */
 function parseRuns() {
   const files = transcriptFiles();
   const fp = fingerprint(files);
   if (memo && memo.fp === fp) {
-    // A cache hit skips the read loop, so carry its counts forward — otherwise a
-    // perfectly healthy memo hit reports "files found, none read".
+    // 命中快取會跳過讀取迴圈，所以要把它的計數帶過來 —— 否則一次完全正常的快取命中
+    // 會回報成「找到檔案，但一個都沒讀」。
     Object.assign(lastScan, memo.scan);
     return memo.runs;
   }
@@ -280,7 +272,7 @@ function parseRuns() {
   return runs;
 }
 
-/* ── payloads ─────────────────────────────────────────────────────────────── */
+/* ── 回傳資料 ─────────────────────────────────────────────────────────────── */
 
 const spendError = (message) => ({
   available: false,
@@ -295,12 +287,12 @@ const spendError = (message) => ({
 });
 
 /**
- * parseRuns() behind one guard, for both public entry points.
+ * 把 parseRuns() 包在單一層防護裡，供兩個對外進入點共用。
  *
- * dirsIn rethrows anything that is not ENOENT, and this used to run twice per
- * detail request — once via localAgentSpend() and once outside any try/catch —
- * so a directory disappearing between the two turned a reportable
- * { available: false, error } payload into an unhandled 500.
+ * dirsIn 會把非 ENOENT 的錯誤重新拋出，而這段以前在一次 detail 請求裡會跑「兩次」——
+ * 一次經由 localAgentSpend()，另一次則完全不在任何 try/catch 內 ——
+ * 所以只要目錄在這兩次之間消失，一個原本可以正常回報的
+ * { available: false, error } 就會變成未處理的 500。
  */
 function tryParseRuns() {
   try {
@@ -310,23 +302,22 @@ function tryParseRuns() {
   }
 }
 
-/** Inclusive day-range filter, on the day a run started. */
+/** 以「執行開始的那一天」做日期區間篩選，頭尾皆包含。 */
 const inRange = (run, { since, until } = {}) =>
   (!since || (run.day && run.day >= since)) && (!until || (run.day && run.day <= until));
 
 /**
- * Range-filtered rollup for the overview card. `available` is false when this
- * machine has no local-agent transcripts at all, so the UI can drop the card
- * rather than show a permanent $0.00 — but a read failure must NOT look like
- * that, or the card vanishes and takes the explanation with it. It surfaces as
- * `error` instead, and nothing is cached, so the next request retries.
+ * 給總覽卡片用的區間彙總。當這台機器完全沒有 local agent 記錄時 `available` 為 false，
+ * 讓 UI 可以把卡片收起來，而不是永遠顯示 $0.00 —— 但讀取失敗「絕不能」長得像那樣，
+ * 否則卡片消失時也把原因一起帶走了。讀取失敗會改以 `error` 呈現，而且不做任何快取，
+ * 所以下一次請求會重試。
  */
 export function localAgentSpend(range = {}) {
   const { runs, error } = tryParseRuns();
   return error === null ? spendFrom(runs, range) : spendError(error);
 }
 
-/** The rollup itself, split out so localAgentDetail can share one parseRuns(). */
+/** 彙總本體，獨立出來讓 localAgentDetail 能共用同一次 parseRuns()。 */
 function spendFrom(all, range = {}) {
   const runs = all.filter((r) => inRange(r, range));
   const sum = (rows, field) => rows.reduce((n, r) => n + r[field], 0);
@@ -338,7 +329,7 @@ function spendFrom(all, range = {}) {
     tokens: sum(runs, 'tokens'),
     firstDay: all[0]?.day ?? null,
     lastDay: all[all.length - 1]?.day ?? null,
-    // Unfiltered, so an empty range can point at where the data actually is.
+    // 未經篩選，這樣當某個區間查無資料時，還能指出資料實際落在哪裡。
     totalCost: sum(all, 'cost'),
     totalRuns: all.length,
     dataDir: LOCAL_AGENT_DIR,
@@ -346,7 +337,7 @@ function spendFrom(all, range = {}) {
   };
 }
 
-/** One run as the detail tab shows it, newest first. */
+/** 明細分頁所呈現的單次執行，最新的排前面。 */
 const runRow = (r) => ({
   id: r.run,
   task: r.task ?? MANUAL,
@@ -361,11 +352,11 @@ const runRow = (r) => ({
 });
 
 /**
- * Runs grouped by scheduled task.
+ * 依排程任務分組的執行紀錄。
  *
- * Grouping by task is the point: one row per `<scheduled-task name>` answers
- * "what is this thing costing me per day", which is the only actionable
- * question here — these runs fire unattended and nobody is watching them.
+ * 依任務分組正是重點：每個 `<scheduled-task name>` 一列，回答的是
+ * 「這東西每天花我多少錢」，而這也是這裡唯一可行動的問題 ——
+ * 這些執行是無人看管自動觸發的，沒有人在旁邊盯著。
  */
 function groupByTask(rows) {
   const byTask = new Map();
@@ -386,7 +377,7 @@ function groupByTask(rows) {
     .sort((a, z) => z.cost - a.cost);
 }
 
-/** Per-run detail for the local agent tab, grouped by scheduled task. */
+/** local agent 分頁的每次執行明細，依排程任務分組。 */
 export function localAgentDetail(range = {}) {
   const { runs: all, error } = tryParseRuns();
   if (error !== null) return { ...spendError(error), runs: [], byTask: [] };
