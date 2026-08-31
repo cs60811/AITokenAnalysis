@@ -1527,7 +1527,7 @@ $('#refresh').addEventListener('click', async (e) => {
       await fetchAll();
     });
   } catch (err) {
-    // 沒有這段，那個 rejection 會被吞掉，頁面就會安靜地continue顯示過期的數字，
+    // 沒有這段，那個 rejection 會被吞掉，頁面就會安靜地繼續顯示過期的數字，
     // 好像重新整理成功了一樣。
     showLoadError(err);
   } finally {

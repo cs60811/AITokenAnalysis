@@ -292,7 +292,7 @@ const TURN_FIELDS = ['promptId', 'sessionId', 'text', 'snippet', 'timestamp', 'g
  * task-notification 裡的 <tool-use-id>，在 45 個帶有它的未連結 agent 中，能解析到真實
  * tool_use 區塊的有 0 個；agent 檔案第一行的 `sourceToolAssistantUUID`，48 個中也是 0 個。
  * 兩者都是結構性地失敗 —— 如果那個 tool_use 真的有寫進主記錄，它的 tool_result 就會帶著
- * agentId，第一條路早就match到了。
+ * agentId，第一條路早就比對到了。
  *
  * 成本之所以維持三層拆分，是因為 `ccusage session` 只算 main+subagent，會靜默地漏掉
  * workflow 這一層 —— 在 ced37f19 上那等於藏了 $25.24（22%）。
