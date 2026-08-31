@@ -1,7 +1,7 @@
-// One-off: render public/favicon.svg into a multi-size build/icon.ico.
-// Deps are intentionally NOT in package.json — run with:
+// 一次性工具：把 public/favicon.svg 產生成多尺寸的 build/icon.ico。
+// 相依套件刻意「不」放進 package.json —— 執行方式：
 //   npm i --no-save sharp png-to-ico && node scripts/make-icon.mjs
-// The resulting build/icon.ico is committed, so `npm run dist` needs none of this.
+// 產出的 build/icon.ico 已經進版控，所以 `npm run dist` 完全不需要這些東西。
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';

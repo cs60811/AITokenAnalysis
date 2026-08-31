@@ -3,23 +3,23 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 /**
- * Desktop shell: the Express server runs in a utility process on a dynamic port
- * and the window is a plain browser pointed at 127.0.0.1 — no preload, no IPC.
+ * 桌面外殼：Express 伺服器跑在一個 utility process 裡、使用動態 port，
+ * 而視窗只是一個指向 127.0.0.1 的普通瀏覽器 —— 沒有 preload、沒有 IPC。
  *
- * The server used to run IN this process. Its cold path is thousands of
- * synchronous fs calls plus a ~170 MB readFileSync corpus, which froze the whole
- * window on 重新整理 (Windows: 「沒有回應」). Web mode never froze, because there
- * the server is its own `node` process; this restores that property.
+ * 這個伺服器以前是跑在「這個」程序裡的。它的冷啟動路徑包含數千次同步 fs 呼叫，
+ * 外加一份約 170 MB 的 readFileSync 語料，會讓整個視窗在「重新整理」時凍住
+ * （Windows 上顯示「沒有回應」）。網頁版從來不會凍住，因為那邊的伺服器本來就是
+ * 獨立的 `node` 程序；這個做法就是把那個特性找回來。
  */
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const HOST_ENTRY = path.join(__dirname, 'server-host.cjs');
-// initPricing() fetches LiteLLM with a 5s timeout before listen, and a cold
-// Defender scan of electron.exe adds seconds on top. Be generous.
+// initPricing() 會在開始監聽前以 5 秒逾時去抓 LiteLLM，而 Defender 對 electron.exe
+// 的冷掃描還會再多花幾秒。這裡放寬一點。
 const START_TIMEOUT_MS = 30_000;
 const MAX_RESTARTS = 2;
 
-// ASCII, productName-independent data dir: %APPDATA%\AITokenAnalysis
+// 純 ASCII、且不隨 productName 變動的資料目錄：%APPDATA%\AITokenAnalysis
 app.setPath('userData', path.join(app.getPath('appData'), 'AITokenAnalysis'));
 
 if (!app.requestSingleInstanceLock()) {
@@ -29,41 +29,41 @@ if (!app.requestSingleInstanceLock()) {
   let child = null;
   let quitting = false;
   let restarts = 0;
-  /** Last lines of child output, so a startup failure can show why. */
+  /** 子程序輸出的最後幾行，這樣啟動失敗時才能說明原因。 */
   const tail = [];
 
   const log = (chunk) => {
     tail.push(String(chunk));
     if (tail.length > 40) tail.shift();
-    // A packaged Windows GUI app has no console attached.
+    // 打包後的 Windows GUI 程式沒有附掛主控台。
     try {
       process.stdout.write(chunk);
     } catch {
-      // no stdout
+      // 沒有 stdout
     }
   };
 
-  /** Fork the server and resolve once it reports the port it is listening on. */
+  /** 派生伺服器程序，並在它回報所監聽的 port 之後 resolve。 */
   function startServerProcess() {
     return new Promise((resolve, reject) => {
       const proc = utilityProcess.fork(HOST_ENTRY, [], {
         serviceName: 'AITA server',
-        // Must be a REAL directory: the app root is inside app.asar, which is not
-        // one, and a packaged build fails to start if we point cwd at it.
+        // 這裡必須是「真的」目錄：app 根目錄位於 app.asar 之內，那並不是真目錄，
+        // 若把 cwd 指到那裡，打包後的版本會啟動失敗。
         cwd: app.getPath('userData'),
         stdio: 'pipe',
         env: {
           ...process.env,
-          // Read at import time by config.js. The packaged app root lives in
-          // read-only app.asar, so the pricing cache moves to userData.
+          // config.js 會在載入時讀這個值。打包後的 app 根目錄位於唯讀的 app.asar，
+          // 所以定價快取要改放到 userData。
           AITA_CACHE_DIR: path.join(app.getPath('userData'), 'cache'),
-          // The child must not be identified by process.versions.electron —
-          // see IS_DESKTOP in config.js.
+          // 不能靠 process.versions.electron 來辨識這個子程序 ——
+          // 見 config.js 裡的 IS_DESKTOP。
           AITA_DESKTOP: '1',
         },
       });
 
-      // An unread pipe fills and stalls the child, so these must stay attached.
+      // 沒人讀的管線會塞滿並卡住子程序，所以這兩個必須一直掛著。
       proc.stdout?.on('data', log);
       proc.stderr?.on('data', log);
 
@@ -81,18 +81,18 @@ if (!app.requestSingleInstanceLock()) {
         else if (msg?.type === 'error') settle(reject, new Error(msg.message));
       });
       proc.on('exit', (code) => {
-        // Settles the startup promise if we never got a port (a child that died
-        // during import surfaces its stack instead of hanging for 30s); a no-op
-        // once the promise has already settled.
+        // 若我們始終沒拿到 port，就在這裡把啟動的 promise 收掉（讓在載入階段就
+        // 死掉的子程序把它的堆疊顯示出來，而不是空等 30 秒）；
+        // 若 promise 已經收過了，這裡就什麼也不做。
         settle(reject, new Error(`伺服器程序結束（代碼 ${code}）`));
         onChildExit(proc, code);
       });
     });
   }
 
-  /** Crash after a successful start: restart a couple of times, then give up loudly. */
+  /** 成功啟動後才崩潰：重試幾次，再放棄並明確地報出來。 */
   function onChildExit(proc, code) {
-    if (proc !== child || quitting) return; // startup failure, or we killed it
+    if (proc !== child || quitting) return; // 啟動失敗，或是我們自己殺掉的
     child = null;
     if (restarts >= MAX_RESTARTS) {
       fail(`伺服器程序反覆結束（代碼 ${code}）`);
@@ -102,7 +102,7 @@ if (!app.requestSingleInstanceLock()) {
     startServerProcess()
       .then(({ proc: next, port }) => {
         child = next;
-        // The port is new, so the window has to be re-pointed.
+        // port 換新的了，所以視窗必須重新指向。
         win?.loadURL(`http://127.0.0.1:${port}/`);
         setTimeout(() => {
           restarts = 0;
@@ -128,7 +128,7 @@ if (!app.requestSingleInstanceLock()) {
   app.on('before-quit', () => {
     quitting = true;
   });
-  // Belt and braces: nothing may outlive the window.
+  // 雙保險：不允許任何東西活得比視窗久。
   app.on('will-quit', () => {
     child?.kill();
     child = null;
@@ -155,7 +155,7 @@ if (!app.requestSingleInstanceLock()) {
       webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true },
     });
 
-    // The update toast opens the download page via window.open -> system browser.
+    // 更新提示會透過 window.open 打開下載頁 -> 交給系統瀏覽器。
     win.webContents.setWindowOpenHandler(({ url }) => {
       if (/^https?:/i.test(url)) shell.openExternal(url);
       return { action: 'deny' };

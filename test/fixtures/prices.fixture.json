@@ -1,0 +1,25 @@
+{
+  "fetchedAt": "2026-01-01T00:00:00.000Z",
+  "rates": {
+    "test-opus": {
+      "input_cost_per_token": 0.00001,
+      "output_cost_per_token": 0.0001,
+      "cache_creation_input_token_cost": 0.0000125,
+      "cache_creation_input_token_cost_above_1hr": 0.00002,
+      "cache_read_input_token_cost": 0.000001
+    },
+    "test-no1h": {
+      "input_cost_per_token": 0.00001,
+      "output_cost_per_token": 0.0001,
+      "cache_creation_input_token_cost": 0.0000125,
+      "cache_read_input_token_cost": 0.000001
+    },
+    "test-bare": {
+      "input_cost_per_token": 0.00001,
+      "output_cost_per_token": 0.0001
+    }
+  },
+  "fastMultipliers": {
+    "test-opus": 2
+  }
+}

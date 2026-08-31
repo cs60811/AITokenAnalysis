@@ -2,14 +2,12 @@ import fs from 'node:fs';
 import { SNIPPET_CHARS } from './config.js';
 
 /**
- * Prefixes that mark a user line as machine-generated rather than something the
- * human typed: IDE events, local-command plumbing, task notifications. Ranking
- * that noise would bury the actual expensive prompts.
+ * 這些開頭代表該 user 行是機器產生的，不是人打的：IDE 事件、local-command 的管路、
+ * 任務通知。把這些雜訊拿去排名，真正貴的 prompt 就會被埋掉。
  *
- * A slash-command invocation is NOT on this list, deliberately. `/code-review`
- * is a real thing a human did, and it owns real spend: treating it as noise left
- * every session that opened with one — 15 of them here — with no attributable
- * prompt at all, orphaning $63.59 of main-transcript cost. See commandOf().
+ * 斜線指令刻意「不」列在這裡。`/code-review` 是人真的做了的事，也確實花了錢：
+ * 把它當雜訊會讓每個以斜線指令開頭的 session —— 本機有 15 個 —— 完全沒有可歸因的
+ * prompt，導致 $63.59 的主記錄成本變成孤兒。見 commandOf()。
  */
 const NOISE_PREFIXES = [
   '<local-command-caveat>',
@@ -26,21 +24,21 @@ const NOISE_PREFIXES = [
   'This session is being continued from a previous conversation',
 ];
 
-/** Placeholder for a prompt whose only content is an attachment. */
+/** 內容只有附件的 prompt 用這個字串代表。 */
 export const ATTACHMENT_ONLY = '(附件：圖片／文件)';
 
 /**
- * Extract the human-typed text from a user line's content.
+ * 從一個 user 行的 content 取出人類實際打的文字。
  *
- * Content comes in several shapes on this data (counts across all main files):
- *   string             471   plain typed prompt
- *   array[tool_result] 4603  agent-loop continuation — never a prompt
- *   array[text]        137   typed prompt, block form
- *   array[image,text]  14    typed prompt with a pasted image
- *   array[image]       4     image-only prompt
- *   array[document]    1     document-only prompt
+ * 在這份資料裡 content 有好幾種形狀（統計自所有 main 檔案）：
+ *   string             471   單純打字的 prompt
+ *   array[tool_result] 4603  agent 迴圈的延續 —— 絕對不是 prompt
+ *   array[text]        137   打字的 prompt，區塊形式
+ *   array[image,text]  14    打字的 prompt 並貼上圖片
+ *   array[image]       4     只有圖片的 prompt
+ *   array[document]    1     只有文件的 prompt
  *
- * Returns null when the line is not a prompt at all.
+ * 若這行根本不是 prompt 就回傳 null。
  */
 export function textOf(content) {
   if (typeof content === 'string') return content;
@@ -51,15 +49,15 @@ export function textOf(content) {
     .map((b) => b.text)
     .join('\n');
   if (text.trim()) return text;
-  // Attachment-only prompts are real and carry cost; give them a label so their
-  // turn still gets attributed instead of falling into __unattributed__.
+  // 只有附件的 prompt 也是真的，而且會產生成本；給它一個標籤，讓它的 turn 仍能被
+  // 歸因，而不是掉進 __unattributed__。
   if (content.some((b) => b?.type === 'image' || b?.type === 'document')) return ATTACHMENT_ONLY;
   return null;
 }
 
 /**
- * Earliest timestamp in a transcript, read from the head of the file only.
- * Used to order sessions chronologically without parsing them in full.
+ * 一份記錄裡最早的時間戳，只讀檔案開頭。
+ * 用來在不完整解析的前提下，把 session 依時間排序。
  */
 export function firstTimestamp(file) {
   let fd;
@@ -73,11 +71,11 @@ export function firstTimestamp(file) {
         const j = JSON.parse(line);
         if (j.timestamp) return j.timestamp;
       } catch {
-        break; // truncated by the read window; good enough
+        break; // 被讀取視窗截斷了；到這裡就夠了
       }
     }
   } catch {
-    // unreadable
+    // 讀不到
   } finally {
     if (fd !== undefined) fs.closeSync(fd);
   }
@@ -85,18 +83,15 @@ export function firstTimestamp(file) {
 }
 
 /**
- * Transcripts we could not open, since the last resetReadErrors().
+ * 自上次 resetReadErrors() 以來開不起來的記錄檔。
  *
- * An unreadable transcript used to be indistinguishable from an empty one: the
- * cost in it silently became $0 and nothing anywhere said so. Throwing instead
- * would be worse — a file briefly locked while Claude Code writes it would take
- * the whole dashboard down — so the read still degrades to "no lines", but it
- * is now counted and surfaced in /api/health.
+ * 以前讀不到的記錄和空記錄完全無法區分：裡面的成本會靜默變成 $0，而且沒有任何地方
+ * 會講。改成直接拋錯又更糟 —— Claude Code 正在寫入而短暫鎖住的檔案就會讓整個儀表板
+ * 掛掉 —— 所以讀取失敗仍然退化成「沒有任何行」，但現在會被計數並顯示在 /api/health。
  *
- * This is the collector for the ~/.claude/projects corpus only. Other callers
- * (localagent.js) pass their own via readLines' second argument: they scan a
- * different root on a different schedule, and their failures used to land here
- * and get reported as a transcript-scan failure on the health card.
+ * 這個收集器只服務 ~/.claude/projects 這份語料。其他呼叫端（localagent.js）透過
+ * readLines 的第二個參數傳自己的收集器進來：它們掃的是不同的根目錄、不同的時機，
+ * 而它們的失敗以前會落到這裡，被當成記錄掃描失敗顯示在健康狀態卡上。
  */
 let readErrors = [];
 export const getReadErrors = () => readErrors;
@@ -108,7 +103,7 @@ export function readLines(file, errors = readErrors) {
   try {
     raw = fs.readFileSync(file, 'utf8');
   } catch (err) {
-    // ENOENT is routine: a session can be deleted between the scan and the read.
+    // ENOENT 是常態：session 可能在掃描與讀取之間被刪掉。
     if (err.code !== 'ENOENT') errors.push({ file, code: err.code ?? 'unknown' });
     return out;
   }
@@ -117,7 +112,7 @@ export function readLines(file, errors = readErrors) {
     try {
       out.push(JSON.parse(line));
     } catch {
-      // a torn last line on a live session is expected; skip it
+      // 進行中的 session 最後一行被截斷是正常的；跳過
     }
   }
   return out;
@@ -127,12 +122,11 @@ const COMMAND_NAME_RE = /<command-name>\s*([^<]*?)\s*<\/command-name>/;
 const COMMAND_ARGS_RE = /<command-args>([\s\S]*?)<\/command-args>/;
 
 /**
- * A slash-command invocation, or null when the text is not one.
+ * 解析出一次斜線指令的呼叫；文字不是指令時回傳 null。
  *
- * Two wire shapes on this data (142 lines): built-in commands put
- * `<command-name>` first and ALWAYS carry a `<command-args>` tag; skill and
- * custom commands put `<command-message>` first and carry the tag only when the
- * user actually passed arguments.
+ * 這份資料裡有兩種線上格式（142 行）：內建指令把 `<command-name>` 放前面，而且
+ * 「一定」帶 `<command-args>` 標籤；skill 與自訂指令則把 `<command-message>` 放前面，
+ * 只有在使用者真的傳了參數時才帶那個標籤。
  */
 function commandOf(text) {
   const m = COMMAND_NAME_RE.exec(text);
@@ -142,41 +136,39 @@ function commandOf(text) {
 }
 
 /**
- * True when this line is a prompt a human actually typed — or a slash command
- * they invoked, which is the same thing for our purposes: a deliberate user
- * action that causes spend.
+ * 這一行是不是人真的打出來的 prompt —— 或是他呼叫的斜線指令。對我們來說兩者是同一件事：
+ * 都是使用者刻意做出、且會花錢的動作。
  *
- * The `hasArgsTag && !args` rule drops no-op settings commands (/clear, /effort,
- * /agents, /upgrade, /login) structurally, rather than via a name list that goes
- * stale as Claude Code adds commands. Every one of those turns costs $0.00 here,
- * so it is a ranking decision, not an accounting one; worst case a future no-arg
- * command that does real work gets folded into the preceding prompt rather than
- * becoming unattributable. `/model claude-fable-5` carries args and so survives —
- * that is intended, it is a real action, and cost-sorting sinks it to the bottom.
+ * `hasArgsTag && !args` 這條規則是用「結構」把無作用的設定類指令（/clear、/effort、
+ * /agents、/upgrade、/login）濾掉，而不是靠一份會隨 Claude Code 新增指令而過期的名單。
+ * 這些 turn 在本機的成本都是 $0.00，所以這是排名決策而非記帳決策；最壞的情況是未來某個
+ * 不帶參數卻真的會做事的指令被併進前一個 prompt，而不是變成無法歸因。
+ * `/model claude-fable-5` 帶參數所以會留下來 —— 這是刻意的，它是真實動作，而且依成本
+ * 排序後它自然會沉到最底下。
  *
- * Deliberately does NOT use `promptSource` — verified unreliable on this data
- * (`sdk` covers both human and machine prompts; only 2 of 470 lines were `typed`).
+ * 刻意「不」使用 `promptSource` —— 實測在這份資料上不可靠（`sdk` 同時涵蓋人類與機器
+ * 的 prompt；470 行裡只有 2 行是 `typed`）。
  */
 export function isRealPrompt(line) {
   if (line?.type !== 'user') return false;
   if (line.isMeta === true) return false;
-  if (line.isSidechain === true) return false; // belongs to an agent's own loop
+  if (line.isSidechain === true) return false; // 屬於某個 agent 自己的迴圈
   const raw = textOf(line.message?.content);
   if (!raw) return false;
   const t = raw.trim();
   if (!t) return false;
   if (t.startsWith('<command-name>') || t.startsWith('<command-message>')) {
     const cmd = commandOf(t);
-    if (!cmd) return false; // malformed plumbing, still noise
+    if (!cmd) return false; // 格式壞掉的管路，一樣是雜訊
     return !(cmd.hasArgsTag && !cmd.args);
   }
   return !NOISE_PREFIXES.some((p) => t.startsWith(p));
 }
 
 /**
- * The prompt text of a line already known to satisfy isRealPrompt().
- * A command renders as `/code-review` or `/goal 增加字體縮放`, never as the raw
- * XML blob — snippet() and every UI that shows it inherit this for free.
+ * 取出一個已確定通過 isRealPrompt() 的行的 prompt 文字。
+ * 指令會呈現成 `/code-review` 或 `/goal 增加字體縮放`，絕不會是原始的 XML 區塊 ——
+ * snippet() 以及每個顯示它的 UI 都直接受惠。
  */
 export function promptTextOf(line) {
   const t = (textOf(line.message?.content) ?? '').trim();
@@ -185,7 +177,7 @@ export function promptTextOf(line) {
   return cmd.args ? `${cmd.name} ${cmd.args}` : cmd.name;
 }
 
-/** An assistant line that carries billable usage. */
+/** 帶有可計費 usage 的 assistant 行。 */
 export function isBillable(line) {
   if (line?.type !== 'assistant') return false;
   const model = line.message?.model;
@@ -194,9 +186,8 @@ export function isBillable(line) {
 }
 
 /**
- * Dedup key. Verified necessary: the main transcript for ced37f19 holds 732
- * billable lines but only 249 unique messages (66% repeats). Deduping on this
- * key is what makes our totals match ccusage exactly.
+ * 去重用的鍵。已驗證必要：ced37f19 的主記錄有 732 行可計費，但只有 249 則不重複的
+ * 訊息（66% 是重複）。正是靠這個鍵去重，我們的總額才能和 ccusage 完全一致。
  */
 export function dedupKey(line) {
   const id = line.message?.id;
@@ -205,16 +196,15 @@ export function dedupKey(line) {
 }
 
 /**
- * key -> the FINAL usage record for that message within one file.
+ * key -> 同一個檔案內該訊息「最後」的 usage 記錄。
  *
- * A streamed assistant message is appended once per partial write: same
- * id|requestId, output_tokens growing with each write ([3, 3, 276] is typical;
- * 1307 such groups on this corpus, every one monotonic). Only the last write is
- * complete, and it is the one ccusage counts — taking the first, as we did,
- * under-reported the global total by 1.05%.
+ * 串流中的 assistant 訊息每寫一次部分內容就會被追加一行：id|requestId 相同，
+ * output_tokens 隨每次寫入增加（[3, 3, 276] 是典型值；本語料有 1307 組，每組都是遞增）。
+ * 只有最後一次寫入是完整的，而 ccusage 算的也是那一次 —— 我們原本取第一次，
+ * 導致全域總額少報 1.05%。
  *
- * Returns usage only; the caller still counts the FIRST occurrence so the
- * parentUuid chain that assigns cost to a turn stays intact.
+ * 這裡只回傳 usage；呼叫端仍然採計「第一次」出現的位置，好讓決定成本歸屬到哪個 turn
+ * 的 parentUuid 鏈保持完整。
  */
 export function finalUsageByKey(lines) {
   const out = new Map();

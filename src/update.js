@@ -4,13 +4,13 @@ import path from 'node:path';
 import { IS_DESKTOP, REPO_URL, ROOT } from './config.js';
 
 /**
- * Self-update, two modes:
+ * 自我更新，兩種模式：
  *
- * - git (clone installs): "new release" = the tracked upstream branch has
- *   commits we don't. Supports one-click pull + restart.
- * - zip (no .git at all): compare our package.json version against the repo's
- *   on raw.githubusercontent.com. Notify only — the button opens the zip
- *   download; bumping `version` on release is what makes the toast appear.
+ * - git（以 clone 方式安裝）：「有新版」＝所追蹤的上游分支有我們沒有的 commit。
+ *   支援一鍵 pull + 重啟。
+ * - zip（完全沒有 .git）：拿我們的 package.json 版本，比對 repo 在
+ *   raw.githubusercontent.com 上的版本。只做通知 —— 按鈕會打開 zip 下載頁；
+ *   發版時把 `version` 往上調，才會讓那個提示浮出來。
  */
 
 const RAW_PKG_URL = `${REPO_URL.replace('https://github.com/', 'https://raw.githubusercontent.com/')}/master/package.json`;
@@ -30,7 +30,7 @@ function git(args, timeout = GIT_TIMEOUT_MS) {
         shell: false,
         timeout,
         windowsHide: true,
-        // Never let git pop a credential prompt under a headless server.
+        // 絕不讓 git 在無介面的伺服器環境下跳出輸入帳密的視窗。
         env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
       },
       (err, stdout, stderr) => {
@@ -41,17 +41,17 @@ function git(args, timeout = GIT_TIMEOUT_MS) {
   });
 }
 
-/** Cache the check so page reloads don't hammer `git fetch`. */
+/** 把檢查結果快取起來，免得每次重新載入頁面都去狂打 `git fetch`。 */
 let cache = { at: 0, result: null };
 const CHECK_TTL_MS = 30 * 60_000;
 
 export async function checkForUpdate({ force = false } = {}) {
   if (!force && cache.result && Date.now() - cache.at < CHECK_TTL_MS) return cache.result;
 
-  // null = not a git checkout at all -> fall back to the zip version check.
-  // A git checkout without upstream (dev branches) stays silent on purpose.
-  // The desktop build always version-checks: `electron .` in the repo would
-  // otherwise see .git and offer the one-click update the desktop build disables.
+  // null 代表根本不是 git checkout -> 退回用 zip 的版本比對。
+  // 有 git checkout 但沒有上游分支（開發用分支）則刻意保持安靜。
+  // 桌面版一律走版本比對：否則在 repo 裡執行 `electron .` 會看到 .git，
+  // 進而提供那個桌面版其實已停用的一鍵更新。
   const result = (IS_DESKTOP ? null : await gitCheck()) ?? (await zipCheck());
   result.checkedAt = new Date().toISOString();
   cache = { at: Date.now(), result };
@@ -62,7 +62,7 @@ async function gitCheck() {
   try {
     await git(['rev-parse', '--is-inside-work-tree']);
   } catch {
-    return null; // no .git (zip install) or git not installed
+    return null; // 沒有 .git（zip 安裝）或根本沒裝 git
   }
   try {
     let upstream;
@@ -88,7 +88,7 @@ async function gitCheck() {
   }
 }
 
-/** a > b for dotted version strings ("1.10.0" > "1.9.1"). */
+/** 比較帶點號的版本字串，判斷 a 是否大於 b（"1.10.0" > "1.9.1"）。 */
 function newerVersion(a, b) {
   const pa = String(a).split('.').map(Number);
   const pb = String(b).split('.').map(Number);
@@ -126,7 +126,7 @@ async function zipCheck() {
 }
 
 export async function applyUpdate() {
-  // Pulling over local edits can lose work — refuse on modified tracked files.
+  // 在本機有改動的情況下 pull 可能弄丟成果 —— 只要有被追蹤的檔案被修改就拒絕。
   const dirty = (await git(['status', '--porcelain']))
     .split('\n')
     .filter((l) => l && !l.startsWith('??'));
@@ -144,12 +144,12 @@ export async function applyUpdate() {
 }
 
 /**
- * Restart after an update: spawn a detached shell that waits for this process
- * to release the port, refreshes dependencies (covers package.json bumps in the
- * pull), and starts the server again — then exit.
+ * 更新後重啟：啟動一個獨立（detached）的 shell，等這個程序釋放 port、
+ * 重新安裝相依套件（涵蓋這次 pull 進來的 package.json 變動），再把伺服器啟動起來 ——
+ * 然後自己結束。
  *
- * `ping -n 3` is the sleep: `timeout` errors out when stdin is not a console,
- * which is exactly the case for a detached child.
+ * `ping -n 3` 是拿來當 sleep 用的：當 stdin 不是主控台時 `timeout` 會直接報錯，
+ * 而獨立子程序正好就是這種情況。
  */
 export function scheduleRestart() {
   if (process.platform === 'win32') {
@@ -166,6 +166,6 @@ export function scheduleRestart() {
       { detached: true, stdio: 'ignore' },
     ).unref();
   }
-  // Give the HTTP response time to flush before dying.
+  // 在結束前留點時間讓 HTTP 回應送出去。
   setTimeout(() => process.exit(0), 400).unref();
 }

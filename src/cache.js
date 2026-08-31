@@ -5,41 +5,39 @@ import { CACHE_VERSION } from './config.js';
 import { getReadErrors, resetReadErrors } from './parser.js';
 
 /**
- * Whole-corpus memo, invalidated by a fingerprint over every transcript's
- * (path, size, mtime).
+ * 整份語料的快取，以每個記錄檔的 (路徑, 大小, mtime) 組成的指紋來失效。
  *
- * The design plan called for a per-session incremental cache, but that turned out
- * to be unsound: dedup has to run globally across sessions (a resumed session
- * replays 592 messages worth $133.64 that also live in the original transcript),
- * so one session's result depends on the others. Caching them independently would
- * let stale neighbours change a session's cost.
+ * 原本的設計是做「每個 session 各自的增量快取」，但那被證明是不成立的：
+ * 去重必須跨所有 session 全域執行（一個被續接的 session 會重播 592 則、
+ * 價值 $133.64 的訊息，而那些訊息同時也存在於原本的記錄裡），
+ * 所以某個 session 的結果會相依於其他 session。各自獨立快取，會讓過期的鄰居
+ * 改變某個 session 的成本。
  *
- * A full re-analysis of all 409 files / 171 MB measures ~1.4s, and fingerprinting
- * costs ~20ms, so caching the whole result is both simpler and always correct.
+ * 全部 409 個檔案／171 MB 重新分析一次實測約 1.4 秒，而算指紋約 20 毫秒，
+ * 所以整份一起快取既比較單純，也永遠是正確的。
  */
 let memo = null;
 
 /**
- * The scan (directory walk + one statSync per transcript) behind the fingerprint,
- * shared by everything that asks within SCAN_TTL_MS.
+ * 指紋背後的那次掃描（走訪目錄 + 對每個記錄檔做一次 statSync），
+ * 在 SCAN_TTL_MS 之內由所有詢問者共用。
  *
- * Without this, one 重新整理 cost ~12 independent scans — every aggregate entry
- * point re-walks the tree, and /api/health does it four times. Worse, while a
- * Claude Code session is writing, each scan produced a DIFFERENT fingerprint, so
- * all nine parallel requests missed the memo and each re-parsed the whole corpus:
- * ~13s of blocked event loop instead of one 1.4s pass. Sharing the scan makes the
- * burst agree on one fingerprint, so exactly one of them parses.
+ * 沒有這個，一次「重新整理」要付出約 12 次獨立掃描 —— 每個彙總進入點都會重走一次
+ * 目錄樹，而 /api/health 自己就走了四次。更糟的是，當某個 Claude Code session 正在
+ * 寫入時，每次掃描都會算出「不同的」指紋，於是九個並行請求全部沒命中快取，
+ * 各自把整份語料重新解析一遍：事件迴圈被卡住約 13 秒，而不是跑完一次 1.4 秒。
+ * 共用掃描結果能讓這一叢請求對同一個指紋達成共識，於是只有其中一個會真的去解析。
  *
- * The TTL never hides a user-requested refresh: invalidate() drops the scan, so
- * POST /api/refresh always rescans.
+ * 這個 TTL 絕不會蓋掉使用者主動要求的重新整理：invalidate() 會把掃描結果丟掉，
+ * 所以 POST /api/refresh 一定會重新掃描。
  */
 let scan = null;
 const SCAN_TTL_MS = 1000;
 
 /**
- * Counters since the last invalidate(), i.e. since the last 重新整理. Reported on
- * /api/health so "one scan and one parse per refresh cycle" is something you can
- * read off the dashboard instead of having to instrument a build.
+ * 自上次 invalidate()（也就是上次「重新整理」）以來的計數。會顯示在 /api/health 上，
+ * 讓「一次重新整理只掃描一次、只解析一次」這件事可以直接從儀表板上讀到，
+ * 而不必特地去替建置加上量測。
  */
 let stats = { scans: 0, parses: 0, scanMs: 0 };
 export const cacheStats = () => ({ ...stats });
@@ -70,7 +68,7 @@ function currentScan() {
   return scan;
 }
 
-/** Analysis of every session, recomputed only when a transcript actually changes. */
+/** 所有 session 的分析結果，只有在記錄檔真的變動時才重算。 */
 export function getAnalysis({ force = false } = {}) {
   const s = currentScan();
 
@@ -87,17 +85,17 @@ export function getAnalysis({ force = false } = {}) {
     generatedAt: new Date().toISOString(),
     parseMs: Date.now() - started,
     fileCount: s.fileCount,
-    // Transcripts that could not be opened during THIS analysis. Cost inside
-    // them is missing from every number on the dashboard, so it has to be said.
-    // A copy, not the live array: localagent.js pushes into the same collector
-    // (parser.js) outside our resetReadErrors() window, and its failures must not
-    // appear inside an already-memoized transcript analysis.
+    // 在「這一次」分析期間開不起來的記錄檔。它們裡面的成本不會出現在儀表板的
+    // 任何數字上，所以必須明講出來。
+    // 這裡存的是副本而非那個活的陣列：localagent.js 會在我們 resetReadErrors()
+    // 的時間窗之外，往同一個收集器（parser.js）裡塞東西，而它的失敗絕不該出現在
+    // 一份已經被快取起來的記錄分析裡。
     readErrors: [...getReadErrors()],
   };
   memo = { fingerprint: s.fp, data };
-  // The parse outlives SCAN_TTL_MS, so without re-stamping, the very next request
-  // of the same burst would rescan, see a session that grew meanwhile, and parse
-  // all over again. Restart the clock from the end of the work we just did.
+  // 解析本身耗時超過 SCAN_TTL_MS，所以若不重新打時間戳，同一叢請求裡的下一個
+  // 就會重新掃描、看到期間又長大的 session，然後整個再解析一次。
+  // 因此從我們剛做完的工作結束時重新起算。
   s.at = Date.now();
   return { ...data, cached: false };
 }
@@ -108,7 +106,7 @@ export function invalidate() {
   stats = { scans: 0, parses: 0, scanMs: 0 };
 }
 
-/** Fingerprint of the current transcript corpus — shared with the ccusage cache. */
+/** 目前記錄語料的指紋 —— 與 ccusage 快取共用。 */
 export function currentFingerprint() {
   return currentScan().fp;
 }

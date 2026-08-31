@@ -10,7 +10,10 @@
     "start": "node src/server.js",
     "verify": "node src/verify.js",
     "app": "electron .",
-    "dist": "electron-builder --win"
+    "dist": "electron-builder --win",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "coverage": "vitest run --coverage"
   },
   "engines": {
     "node": ">=20"
@@ -53,7 +56,9 @@
     }
   },
   "devDependencies": {
+    "@vitest/coverage-v8": "^4.1.11",
     "electron": "^43.2.0",
-    "electron-builder": "^26.15.3"
+    "electron-builder": "^26.15.3",
+    "vitest": "^4.1.11"
   }
 }

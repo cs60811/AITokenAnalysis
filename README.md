@@ -40,9 +40,11 @@ GitHub Release。桌面版與 zip 版的更新通知都比對 master 上 `packag
 熟悉指令列的話也可以直接：
 
 ```bash
-npm install    # 相依套件已含 ccusage，毋須另外全域安裝
-npm start      # http://127.0.0.1:4317
-npm run verify # 對帳驗證（見下方）
+npm install      # 相依套件已含 ccusage，毋須另外全域安裝
+npm start        # http://127.0.0.1:4317
+npm run verify   # 對帳驗證（見下方）
+npm test         # 單元測試（見下方）
+npm run coverage # 單元測試 + 覆蓋率報告
 ```
 
 ### 匯出用量 JSON（回報用）
@@ -198,21 +200,49 @@ ccusage 也不對它加價。models.dev 短暫連不上時退回磁碟上的前�
 故此模組改以 `message.id` 為鍵；另外每個 run 都帶一份 skill 套件的副本，遞迴掃描要跨 ~430 個目錄
 （~85ms／次），因此改為直接讀取已知的兩個固定位置。
 
+## 單元測試 (`npm test`)
+
+Vitest，351 個測試，覆蓋率 **98.5% 敘述／91.1% 分支／99.6% 行數**。
+
+```bash
+npm test         # 跑一次
+npm run test:watch
+npm run coverage # 加上覆蓋率報告
+```
+
+`npm run verify` 和 `npm test` 問的是**兩個不同的問題**，兩個都要過：
+
+- **`verify`** 問「總額對不對」——拿真實語料跟即時的 `ccusage daily` 對帳到分。它是這個工具的存在理由，但它只看得到總數，看不出某個函式的邊界條件壞掉。
+- **`test`** 問「每個決策還在不在」——用合成的 JSONL／目錄樹釘住那些**用實測換來、而且看起來像 bug 其實不是**的行為。例如：串流訊息只算最後一次寫入、找不到歸屬的 agent 寧可留在 `__unattributed__` 也不用時間戳去猜、沒有公布 fast 溢價的模型以基礎費率計價（$0 是謊話）、workflow 層要和 `ccusageCost` 分開。這些光看總額都是對的，改壞了也不會被 `verify` 抓到。
+
+測試不碰網路、不碰 `~/.claude`，也不依賴這台機器的語料——定價用 `test/fixtures/` 的固定費率表，語料用臨時目錄裡的合成 JSONL，所以金額都能斷言到精確數字。
+
+以下**刻意不納入覆蓋率**（理由記在 `vitest.config.js`）：`server.js`（載入即綁 port）、`verify.js`（呼叫 ccusage 對帳）、`update.js`（呼叫 git／GitHub 並重啟程序）——這三個是整合面，由 `npm run verify` 和實際跑起來涵蓋；`public/app.js` 的 DOM 膠水則以實際跑頁面驗證，其純邏輯已抽到 `public/lib.js`（100% 敘述覆蓋）。
+
 ## 架構
 
 ```
 src/
-  server.js     Express，只綁 127.0.0.1
-  config.js     路徑、port、容差常數
-  ccusage.js    以 node 直接執行 ccusage 的 cli.js（見下）
-  pricing.js    LiteLLM 抓取 + fallback + costOf()
-  discover.js   遞迴掃描，依層級標記 main / subagent / workflow
-  parser.js     逐行解析 + isRealPrompt() 分類器
-  attribute.js  turn 歸因 + 三層成本切分
-  cache.js      全域指紋快取
-  aggregate.js  API 資料整形
-  verify.js     對帳驗證
-public/         index.html / app.js / style.css / vendor/chart.umd.min.js
+  server.js        Express，只綁 127.0.0.1
+  config.js        路徑、port、容差常數
+  ccusage.js       以 node 直接執行 ccusage 的 cli.js（見下）
+  ccusage-cache.js ccusage 全量文件快取（含 SWR 背景更新）
+  pricing.js       LiteLLM 抓取 + fallback + costOf()
+  discover.js      遞迴掃描，依層級標記 main / subagent / workflow
+  parser.js        逐行解析 + isRealPrompt() 分類器
+  attribute.js     turn 歸因 + 三層成本切分
+  cache.js         全域指紋快取
+  aggregate.js     API 資料整形
+  localagent.js    local agent 排程任務支出（ccusage 看不到的部分）
+  update.js        自動更新（git／zip 兩種模式）
+  verify.js        對帳驗證
+public/
+  index.html       版面
+  app.js           DOM、圖表、fetch（以 module 載入）
+  lib.js           前端純邏輯：格式化／分桶／排序／驗證（可單元測試）
+  style.css        樣式
+  vendor/          chart.umd.min.js
+test/              Vitest 單元測試，與 src/ 檔名一一對應
 ```
 
 ### 兩個實作上的取捨

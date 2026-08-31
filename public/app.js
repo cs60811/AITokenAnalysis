@@ -1,23 +1,36 @@
-/* AI usage dashboard — vanilla JS + vendored Chart.js. */
+/* AI 用量儀表板 —— 原生 JS + 內嵌的 Chart.js。
+   純邏輯（格式化、分桶、排序、驗證）放在 lib.js 並有單元測試；
+   這裡剩下的全是 DOM、圖表與 fetch。 */
+import {
+  bucketBy,
+  clampFont,
+  compact,
+  cycleSort,
+  escapeHtml,
+  exportRangeFrom,
+  FONT_MAX,
+  FONT_MIN,
+  FONT_STEP,
+  num,
+  sanitizeEmpId,
+  sanitizeSessionSort,
+  SESSION_SORTS,
+  sortIndicator,
+  sortRows,
+  usd,
+  usd4,
+  weekOf,
+  when,
+  yearOf,
+} from './lib.js';
 
 const $ = (sel) => document.querySelector(sel);
 const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 
-const usd = (n) =>
-  n == null ? '—' : `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-const usd4 = (n) => (n == null ? '—' : `$${n.toFixed(n < 1 ? 4 : 2)}`);
-const num = (n) => (n == null ? '—' : n.toLocaleString('en-US'));
-const compact = (n) =>
-  n == null ? '—' : Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 1 }).format(n);
-const when = (ts) => (ts ? new Date(ts).toLocaleString('zh-TW', { hour12: false }) : '—');
-
-const escapeHtml = (s) =>
-  String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-
-/** Categorical slots, assigned in fixed order and never cycled. */
+/** 類別用的色彩槽位，依固定順序分配，且絕不循環重用。 */
 const SLOTS = ['--series-1', '--series-2', '--series-3', '--series-4', '--series-5', '--series-6', '--series-7', '--series-8'];
 
-/** model -> a stable slot, so a model keeps its colour across every chart and filter. */
+/** model -> 固定的槽位，讓同一個模型在每張圖表與每種篩選下都保持同樣的顏色。 */
 const modelColors = new Map();
 function colorForModel(model) {
   if (!modelColors.has(model)) {
@@ -27,10 +40,10 @@ function colorForModel(model) {
 }
 
 /**
- * Above the server's own worst case on purpose: /api/overview waits on ccusage,
- * whose child-process timeout is 60s by itself, and on a firewalled network that
- * is a slow-but-succeeding request (ccusage always fetches remote pricing). A 60s
- * ceiling here would abort it into a visible error just before it returned.
+ * 刻意設得比伺服器自己的最壞情況還高：/api/overview 要等 ccusage，
+ * 而它的子程序逾時本身就有 60 秒；在有防火牆的網路下，那是一個「慢但會成功」的請求
+ * （ccusage 一定會去抓遠端定價）。若這裡也設 60 秒上限，就會在它即將回來的前一刻
+ * 把它中止，變成一個使用者看得到的錯誤。
  */
 const API_TIMEOUT_MS = 90_000;
 
@@ -47,15 +60,10 @@ const api = async (path, opts) => {
   return body;
 };
 
-/* UI font zoom (CSS `zoom` on <html>) — one path for web and Electron, which
-   both render this same page. `zoom` doesn't raise devicePixelRatio, so canvas
-   charts would upscale and blur; render() compensates via config.devicePixelRatio. */
-const FONT_MIN = 0.8, FONT_MAX = 1.6, FONT_STEP = 0.1;
+/* UI 字體縮放（對 <html> 套 CSS `zoom`）—— 網頁版與 Electron 共用同一條路徑，
+   因為兩者渲染的是同一個頁面。`zoom` 不會提高 devicePixelRatio，所以 canvas 圖表
+   會被放大而糊掉；render() 透過 config.devicePixelRatio 來補償這件事。 */
 let fontScale = clampFont(parseFloat(localStorage.getItem('font-scale')) || 1);
-function clampFont(v) {
-  // 5% granularity: matches the slider step and keeps ±10% button/keyboard steps clean.
-  return Math.min(FONT_MAX, Math.max(FONT_MIN, Math.round(v * 20) / 20));
-}
 
 let charts = {};
 function render(id, config) {
@@ -66,19 +74,18 @@ function render(id, config) {
   charts[id] = new Chart(ctx, config);
 }
 
-/* Recessive grid/axes; tooltips on by default. */
+/* 格線與座標軸都做退讓處理；提示框預設開啟。 */
 function baseOpts(extra = {}) {
   const grid = css('--grid');
   const tick = css('--text-muted');
   return {
     responsive: true,
     maintainAspectRatio: false,
-    /* Hover by category, never by 2-D proximity. `nearest` (Chart.js' default axis
-       for that mode is 'xy') snaps to the single closest bar *centre*: on a stacked
-       chart that is routinely a neighbouring column, and near the baseline it is one
-       of the zero-height segments — which the label callbacks hide, leaving a bare
-       "date + 合計 $0.00". Matching the whole index also makes the 合計 footers true
-       column totals instead of the sum of whatever one segment got picked. */
+    /* 以「類別」為單位 hover，絕不用二維距離判定。`nearest`（該模式下 Chart.js 的
+       預設軸是 'xy'）會吸附到「單一最近的長條中心點」：在堆疊圖上那經常是隔壁那一欄，
+       而在接近基線處則會是某個高度為 0 的區段 —— 那種區段會被標籤 callback 隱藏，
+       結果只剩下光禿禿的「日期 + 合計 $0.00」。改成比對整個 index，也讓「合計」頁尾
+       變成真正的整欄總和，而不是隨便被選中的某一段的加總。 */
     interaction: { mode: 'index', intersect: false, axis: extra.indexAxis === 'y' ? 'y' : 'x' },
     plugins: {
       legend: {
@@ -107,11 +114,11 @@ function baseOpts(extra = {}) {
 /* ============================== state ============================== */
 const state = { overview: null, cachewrite: null, improvements: null, trend: null, prompts: null, sessions: null, projects: null, health: null, localagent: null };
 
-/* ============================== date range ============================== */
+/* ============================== 日期範圍 ============================== */
 const fmtDate = (d) =>
   `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 
-/** Fill the date inputs from the selected preset. "custom" leaves them untouched. */
+/** 依所選的預設區間填入日期欄位。選「自訂」時不動它們。 */
 function applyPreset() {
   const v = $('#date-preset').value;
   if (v === 'custom') return;
@@ -122,12 +129,12 @@ function applyPreset() {
   }
   const now = new Date();
   const from = new Date(now);
-  from.setDate(from.getDate() - (Number(v) - 1)); // inclusive of today
+  from.setDate(from.getDate() - (Number(v) - 1)); // 含今天
   $('#date-since').value = fmtDate(from);
   $('#date-until').value = fmtDate(now);
 }
 
-/** Build a URL with the active date range (and any extra query params) applied. */
+/** 組出帶有目前日期範圍（以及任何額外查詢參數）的網址。 */
 function withRange(path, extra = {}) {
   const p = new URLSearchParams();
   const since = $('#date-since').value;
@@ -149,14 +156,13 @@ function drawOverview() {
   const hidden = state.sessions?.totals.workflowCost ?? 0;
   const la = d.localAgent;
 
-  // Money on the top row, counts demoted to a row of compact cards below. Five
-  // equal cards read as "使用模型 10 matters as much as 總成本 $1,042", and the
-  // long Chinese labels here (unlike the other tabs') wrap at that width.
+  // 金額放上排，數量降級成下面那排精簡卡片。五張等寬卡片會讓人讀成
+  // 「使用模型 10 和總成本 $1,042 一樣重要」，而且這裡的中文標籤比其他分頁長，
+  // 在那個寬度下會折行。
   //
-  // Two "hidden spend" cards sit side by side and mean opposite things — the
-  // workflow tier IS inside 總成本 (ccusage daily reads those files; only
-  // `ccusage session` drops them), local agent is NOT. The foot lines carry that
-  // distinction, so don't drop them.
+  // 兩張「隱藏支出」卡片並排，意思卻正好相反 —— workflow 那一層「是」包含在總成本裡的
+  // （ccusage daily 會讀那些檔案；只有 `ccusage session` 會漏掉），
+  // local agent 則「不是」。卡片底下那行文字就是在講這個差別，所以不要拿掉。
   const models = d.models;
   $('#kpi-overview').innerHTML = `
     <div class="kpi-row">
@@ -192,7 +198,7 @@ function drawOverview() {
       </div>
     </div>`;
 
-  // Cost by model — ranked magnitude, one bar per entity, entity-stable colour.
+  // 各模型成本 —— 依量級排序，每個對象一條長條，顏色與對象綁定。
   render('chart-models', {
     type: 'bar',
     data: {
@@ -208,7 +214,7 @@ function drawOverview() {
     options: baseOpts({
       indexAxis: 'y',
       plugins: {
-        legend: { display: false }, // single series — the title names it
+        legend: { display: false }, // 只有單一數列 —— 標題已經說明它是什麼
         tooltip: {
           callbacks: {
             label: (c) => {
@@ -247,35 +253,10 @@ function drawOverview() {
 
 let dailyPeriod = 'day';
 
-/** Re-bucket ccusage rows: sum modelBreakdowns per keyOf(period). */
-function bucketBy(src, keyOf) {
-  const map = new Map();
-  for (const r of src) {
-    const k = keyOf(String(r.period));
-    const agg = map.get(k) ?? { period: k, modelBreakdowns: new Map() };
-    for (const b of r.modelBreakdowns ?? []) {
-      agg.modelBreakdowns.set(b.modelName, (agg.modelBreakdowns.get(b.modelName) ?? 0) + (b.cost ?? 0));
-    }
-    map.set(k, agg);
-  }
-  return [...map.values()].map((a) => ({
-    period: a.period,
-    modelBreakdowns: [...a.modelBreakdowns.entries()].map(([modelName, cost]) => ({ modelName, cost })),
-  }));
-}
-
-/** Monday of the week containing an ISO date — same anchor as the 趨勢 tab. */
-const weekOf = (iso) => {
-  const dt = new Date(`${iso.slice(0, 10)}T00:00:00Z`);
-  dt.setUTCDate(dt.getUTCDate() - ((dt.getUTCDay() + 6) % 7));
-  return dt.toISOString().slice(0, 10);
-};
-
 /**
- * Cost trend stacked by model, re-bucketed to day / week / month / year. `day` and
- * `month` come straight from ccusage (overview.daily / overview.monthly); `week`
- * (Monday-anchored) re-buckets daily and `year` re-buckets monthly on the client.
- * All respect the global date filter.
+ * 依模型堆疊的成本趨勢，可重新分桶成日／週／月／年。「日」與「月」直接來自 ccusage
+ * （overview.daily／overview.monthly）；「週」（以星期一為基準）是在前端把日資料重新分桶，
+ * 「年」則是把月資料重新分桶。全部都會遵守全域的日期篩選。
  */
 function drawDailyTrend(period) {
   const d = state.overview;
@@ -287,7 +268,7 @@ function drawDailyTrend(period) {
   if (period === 'month') {
     rows = d.monthly ?? [];
   } else if (period === 'year') {
-    rows = bucketBy(d.monthly ?? [], (p) => p.slice(0, 4));
+    rows = bucketBy(d.monthly ?? [], yearOf);
   } else if (period === 'week') {
     rows = bucketBy(d.daily ?? [], weekOf);
   } else {
@@ -308,7 +289,7 @@ function drawDailyTrend(period) {
         borderRadius: 3,
         borderSkipped: false,
         borderColor: css('--surface-1'),
-        borderWidth: { top: 2, right: 0, bottom: 0, left: 0 }, // 2px surface gap between stacked segments
+        borderWidth: { top: 2, right: 0, bottom: 0, left: 0 }, // 堆疊區段之間留 2px 的視覺間隙
       })),
     },
     options: baseOpts({
@@ -320,9 +301,9 @@ function drawDailyTrend(period) {
         tooltip: {
           callbacks: {
             label: (c) => (c.parsed.y > 0 ? ` ${c.dataset.label}: ${usd(c.parsed.y)}` : null),
-            // A period can be all zeros — ccusage prices models it doesn't know at
-            // $0.00 (see ccusage.js), so a day of brand-new-model usage arrives as an
-            // invisible column. Say that, rather than showing an empty box.
+            // 某個期間可能整段都是 0 —— ccusage 會把它不認識的模型定價為 $0.00
+            // （見 ccusage.js），所以某天全是全新模型的用量，看起來就是一根隱形的長條。
+            // 與其顯示一個空框，不如把這件事講出來。
             beforeBody: (items) => (items.some((i) => i.parsed.y > 0) ? '' : ' 此期間沒有已計價的用量'),
             footer: (items) => `合計 ${usd(items.reduce((s, i) => s + i.parsed.y, 0))}`,
           },
@@ -333,9 +314,8 @@ function drawDailyTrend(period) {
 }
 
 /**
- * Token composition. Cache reads are ~94% of tokens but ~1/10 the price, so they
- * render in the de-emphasis gray while cache WRITE — the actionable signal — takes
- * the orange slot.
+ * Token 組成。快取讀取約占 token 的 94%，但單價只有約 1/10，所以用弱化的灰色呈現；
+ * 而快取「寫入」—— 真正可行動的訊號 —— 則佔用橘色那個槽位。
  */
 function drawTokenSplit() {
   const d = state.overview;
@@ -397,17 +377,17 @@ function drawTokenSplit() {
     </tbody>`;
 }
 
-/* ========================== TAB: CACHE WRITE ========================== */
+/* ========================== 分頁：快取寫入 ========================== */
 /**
- * Cache-write cost, split 5m vs 1h. The whole tab is ranked by write cost — the
- * one signal that's both expensive and improvable (1h write ≈ 2× input price).
+ * 快取寫入成本，拆成 5 分鐘與 1 小時。整個分頁都依寫入成本排序 ——
+ * 那是唯一一個「既貴、又改得動」的訊號（1 小時寫入約為 input 價格的 2 倍）。
  */
 function drawCacheWrite() {
   const d = state.cachewrite;
   if (!d) return;
   const t = d.totals;
-  const c5 = css('--series-1');       // 5m — blue
-  const c1 = css('--series-write');   // 1h — orange (the expensive, actionable tier)
+  const c5 = css('--series-1');       // 5 分鐘 —— 藍色
+  const c1 = css('--series-write');   // 1 小時 —— 橘色（昂貴且可改善的那一層）
   const writePctOfTotal = t.trueCost ? (t.writeCost / t.trueCost) * 100 : 0;
   const oneHrShare = t.writeCost ? (t.cost1h / t.writeCost) * 100 : 0;
 
@@ -433,7 +413,7 @@ function drawCacheWrite() {
       <div class="foot">下表列出成本最高者</div>
     </div>`;
 
-  // Write vs read: writes are an upfront cost, cheap reads are the payoff.
+  // 寫入 vs 讀取：寫入是前期投入的成本，便宜的讀取才是回報。
   const reuse = t.reuseRatio;
   const verdict = reuse >= 10 ? '重用充分，寫入投資划算' : reuse >= 3 ? '重用尚可' : '重用偏低，寫入可能有浪費';
   $('#cw-efficiency').innerHTML = `
@@ -442,7 +422,7 @@ function drawCacheWrite() {
     <div>讀取／寫入 token 重用倍數<strong>${reuse.toFixed(1)}×</strong></div>
     <div class="${reuse < 3 ? 'accent' : ''}">解讀<strong style="font-size:13px">每寫入 1 個 token 被讀取重用約 ${reuse.toFixed(1)} 次 · ${verdict}</strong></div>`;
 
-  // Projects — horizontal stacked bar, 5m vs 1h.
+  // 各專案 —— 水平堆疊長條，5 分鐘 vs 1 小時。
   const projects = d.projects;
   render('chart-cw-projects', {
     type: 'bar',
@@ -481,7 +461,7 @@ function drawCacheWrite() {
       </tr>`).join('')}
     </tbody>`;
 
-  // Daily trend — vertical stacked bar.
+  // 每日趨勢 —— 垂直堆疊長條。
   const days = d.daily.map((x) => x.period);
   render('chart-cw-daily', {
     type: 'bar',
@@ -508,7 +488,7 @@ function drawCacheWrite() {
     }),
   });
 
-  // Top prompts by write cost — vertical bar (top 15), 5m/1h stacked.
+  // 依寫入成本排名的語句 —— 垂直長條（前 15 名），5 分鐘／1 小時堆疊。
   const rows = d.prompts;
   const top = rows.slice(0, 15);
   render('chart-cw-prompts', {
@@ -559,10 +539,10 @@ function drawCacheWrite() {
   });
 }
 
-/* ============================ TAB: IMPROVE ============================ */
+/* ============================ 分頁：改善建議 ============================ */
 /**
- * Turns the cache-write diagnosis into action. Facts only — no dollar-savings
- * estimates (deliberate). Cards are assembled from the backend's raw numbers.
+ * 把快取寫入的診斷轉成可以行動的建議。只講事實 —— 刻意不做「可省多少錢」的估算。
+ * 卡片都是由後端的原始數字組裝出來的。
  */
 function drawImprove() {
   const d = state.improvements;
@@ -570,7 +550,7 @@ function drawImprove() {
   const t = d.totals;
   const models = d.byModel;
 
-  // Model-choice lever: cheapest priced model used, and the top model's rate multiple.
+  // 模型選擇這個槓桿：用過的模型中最便宜的那個，以及排名第一的模型是它的幾倍費率。
   const rated = models.filter((m) => m.rate1h > 0);
   const minRate = rated.length ? Math.min(...rated.map((m) => m.rate1h)) : 0;
   const topM = models[0];
@@ -580,7 +560,7 @@ function drawImprove() {
 
   const cards = [];
 
-  // A — model choice (the dominant lever)
+  // A —— 模型選擇（最主要的槓桿）
   if (topM && topShare >= 40) {
     cards.push({
       cls: 'danger',
@@ -595,7 +575,7 @@ function drawImprove() {
     });
   }
 
-  // B — low-reuse sessions
+  // B —— 快取重用率偏低的 session
   if (d.lowReuseSessions.length) {
     cards.push({
       cls: 'warn',
@@ -619,7 +599,7 @@ function drawImprove() {
     });
   }
 
-  // D — reuse health (reassurance, so the user doesn't over-optimise writes)
+  // D —— 重用率健康度（用來讓使用者安心，免得過度去優化寫入）
   if (t.reuseRatio >= 10) {
     cards.push({
       cls: 'good',
@@ -636,7 +616,7 @@ function drawImprove() {
       ${c.actions.length ? `<ul>${c.actions.map((a) => `<li>${a}</li>`).join('')}</ul>` : ''}
     </div>`).join('');
 
-  // Model write-cost bar.
+  // 各模型寫入成本長條圖。
   render('chart-imp-models', {
     type: 'bar',
     data: {
@@ -678,7 +658,7 @@ function drawImprove() {
       </tr>`).join('')}
     </tbody>`;
 
-  // Model pricing table — per-million-token rates, so the model-choice lever is legible.
+  // 模型定價表 —— 以每百萬 token 的費率呈現，讓「模型選擇」這個槓桿看得懂。
   const perM = (r) => (r == null ? '—' : `$${(r * 1e6).toFixed(2)}`);
   $('#table-imp-rates').innerHTML = `
     <thead><tr><th>模型</th><th class="num">輸入</th><th class="num">輸出</th><th class="num">5m 寫入</th><th class="num">1h 寫入</th><th class="num">快取讀取</th></tr></thead>
@@ -719,11 +699,11 @@ function drawImprove() {
   });
 }
 
-/* ============================= TAB: TREND ============================= */
+/* ============================= 分頁：行為趨勢 ============================= */
 /**
- * "Am I improving?" — current window vs the previous equal-length window, plus a
- * weekly trend. Direction matters: cost / Opus% / 1h% / cost-per-prompt going DOWN
- * is good (green); reuse going UP is good.
+ * 「我有沒有進步？」—— 本期與前一段等長期間的對比，再加上每週趨勢。
+ * 方向是有意義的：成本／Opus 占比／1 小時占比／每語句成本「往下」是好事（綠色）；
+ * 重用率「往上」才是好事。
  */
 function drawTrend() {
   const d = state.trend;
@@ -732,7 +712,7 @@ function drawTrend() {
   const prev = d.previous;
   const comparable = d.hasComparison && prev && prev.promptCount > 0;
 
-  // metric: value now, formatter, and whether "lower is better".
+  // 每個指標：目前的值、格式化函式，以及「是不是越低越好」。
   const pct = (n) => `${(n * 100).toFixed(0)}%`;
   const metrics = [
     { label: '總成本', now: cur.totalCost, prev: prev?.totalCost, fmt: usd, lowerBetter: true, hero: true },
@@ -760,16 +740,15 @@ function drawTrend() {
       ${deltaHtml(m)}
     </div>`).join('');
 
-  // Weekly trend: cost stacked by model (entity-stable colours, same as every other
-  // chart) + a single Opus-share line. The 1h-write share was dropped from the
-  // chart — it sits at 80-100% every week (a property of Claude Code's caching,
-  // not of user behaviour) and only tangled with the Opus line; its number still
-  // lives in the KPI cards above.
+  // 每週趨勢：依模型堆疊的成本（顏色與對象綁定，跟其他每張圖一致）
+  // 外加一條 Opus 占比的折線。1 小時寫入占比已經從圖上拿掉了 ——
+  // 它每週都落在 80~100%（那是 Claude Code 快取機制的特性，不是使用者行為），
+  // 放上去只會跟 Opus 那條線糾纏在一起；它的數字仍然保留在上方的 KPI 卡片裡。
   const wk = d.weekly;
   const wkModels = [...new Map(
     wk.flatMap((w) => w.byModel ?? []).map((m) => [m.model, 0]),
   ).keys()];
-  // Assign colour slots by overall spend so big models keep their overview colours.
+  // 依整體支出分配色彩槽位，讓大模型維持它們在總覽頁的顏色。
   const wkTotals = new Map(wkModels.map((m) => [m, wk.reduce((s, w) => s + (w.byModel?.find((x) => x.model === m)?.cost ?? 0), 0)]));
   wkModels.sort((a, z) => wkTotals.get(z) - wkTotals.get(a));
 
@@ -826,7 +805,7 @@ function drawPrompts() {
   const rows = d.prompts;
   const top = rows.slice(0, 15);
 
-  // Ranked magnitude -> one hue. Turns that hide workflow cost get the warn hue.
+  // 依量級排序 -> 使用單一色相。藏有 workflow 成本的 turn 則改用警示色。
   render('chart-prompts', {
     type: 'bar',
     data: {
@@ -915,32 +894,13 @@ async function showPrompt(id) {
 
 /* ============================== TAB 3 ============================== */
 
-/* Multi-column sort for the session table. Each header click cycles that column
-   asc -> desc -> off; a column already in the list toggles in place and keeps its
-   priority, a new one is appended at the end. An empty list means "server order"
-   (trueCost desc) — which is what the third click restores. The list is persisted,
-   so the next visit opens with the same ordering. */
+/* session 表格的排序清單會被保存下來，所以下次進來會維持同樣的排序。
+   清單本身由 lib.js 負責（驗證／循環／排序）；這半邊只負責儲存與重繪。 */
 const SESSION_SORT_KEY = 'sessions-sort';
-const SESSION_SORTS = {
-  projectLabel: { cmp: (a, b) => String(a.projectLabel ?? '').localeCompare(String(b.projectLabel ?? ''), 'zh-TW') },
-  lastActivity: { cmp: (a, b) => (Date.parse(a.lastActivity) || 0) - (Date.parse(b.lastActivity) || 0) },
-  promptCount: { cmp: (a, b) => (a.promptCount ?? 0) - (b.promptCount ?? 0) },
-  trueCost: { cmp: (a, b) => (a.trueCost ?? 0) - (b.trueCost ?? 0) },
-};
 
-/* A stale or hand-edited stored value must not take the whole tab down with it. */
 function loadSessionSort() {
   try {
-    const raw = JSON.parse(localStorage.getItem(SESSION_SORT_KEY) ?? '[]');
-    if (!Array.isArray(raw)) return [];
-    const seen = new Set();
-    const out = [];
-    for (const e of raw) {
-      if (!e || !SESSION_SORTS[e.key] || (e.dir !== 'asc' && e.dir !== 'desc') || seen.has(e.key)) continue;
-      seen.add(e.key);
-      out.push({ key: e.key, dir: e.dir });
-    }
-    return out;
+    return sanitizeSessionSort(JSON.parse(localStorage.getItem(SESSION_SORT_KEY) ?? '[]'));
   } catch {
     return [];
   }
@@ -949,47 +909,26 @@ function loadSessionSort() {
 let sessionSort = loadSessionSort();
 
 function cycleSessionSort(key) {
-  if (!SESSION_SORTS[key]) return;
-  const i = sessionSort.findIndex((e) => e.key === key);
-  if (i < 0) sessionSort.push({ key, dir: 'asc' });
-  else if (sessionSort[i].dir === 'asc') sessionSort[i] = { key, dir: 'desc' };
-  else sessionSort.splice(i, 1);
+  const next = cycleSort(sessionSort, key);
+  if (next === sessionSort) return; // 不認識的欄位：沒有東西要存，也不用重繪
+  sessionSort = next;
   try {
     localStorage.setItem(SESSION_SORT_KEY, JSON.stringify(sessionSort));
   } catch { /* private mode / quota: sorting still works for this visit */ }
   renderSessionsTable();
 }
 
-/* Sorts a copy — state.sessions.sessions stays in server order, which the overview
-   tab and the "cancel sort" state both read. Array.prototype.sort is stable, so ties
-   under the active keys fall back to that server order with no explicit tiebreak. */
-function sortedSessions(sessions) {
-  if (!sessionSort.length) return sessions;
-  return [...sessions].sort((a, b) => {
-    for (const { key, dir } of sessionSort) {
-      const v = SESSION_SORTS[key].cmp(a, b);
-      if (v) return dir === 'asc' ? v : -v;
-    }
-    return 0;
-  });
-}
-
 function sortableTh(key, label, cls = '') {
-  const i = sessionSort.findIndex((e) => e.key === key);
-  const active = i >= 0 ? sessionSort[i] : null;
-  const aria = active ? (active.dir === 'asc' ? 'ascending' : 'descending') : 'none';
-  const arrow = active ? (active.dir === 'asc' ? '▲' : '▼') : '';
-  // Priority index only earns its space once there is more than one key to order.
-  const rank = active && sessionSort.length > 1 ? `<sup class="sort-rank">${i + 1}</sup>` : '';
-  return `<th class="sortable${active ? ' sorted' : ''}${cls ? ` ${cls}` : ''}" data-sort="${key}" role="button" tabindex="0" aria-sort="${aria}" title="點擊排序：升冪 → 降冪 → 取消">${escapeHtml(label)}<span class="sort-ind">${arrow}</span>${rank}</th>`;
+  const { active, aria, arrow, rank } = sortIndicator(sessionSort, key);
+  const rankHtml = rank == null ? '' : `<sup class="sort-rank">${rank}</sup>`;
+  return `<th class="sortable${active ? ' sorted' : ''}${cls ? ` ${cls}` : ''}" data-sort="${key}" role="button" tabindex="0" aria-sort="${aria}" title="點擊排序：升冪 → 降冪 → 取消">${escapeHtml(label)}<span class="sort-ind">${arrow}</span>${rankHtml}</th>`;
 }
 
-/* Split out of drawSessions() so a header click re-renders only the table and
-   leaves the project chart alone. */
+/* 從 drawSessions() 拆出來，讓點擊標頭時只重繪表格，不去動專案那張圖。 */
 function renderSessionsTable() {
   const d = state.sessions;
   if (!d) return;
-  const rows = sortedSessions(d.sessions);
+  const rows = sortRows(d.sessions, sessionSort);
 
   $('#table-sessions').innerHTML = `
     <thead><tr>
@@ -1106,7 +1045,7 @@ function drawHealth() {
   const msgs = [];
   let cls = 'ok';
 
-  // First-run on a machine with no transcripts: explain instead of a wall of zeros.
+  // 在完全沒有記錄的機器上第一次執行：給出說明，而不是一整面的 0。
   const noData = h.analysis?.files === 0;
   if (noData) {
     cls = 'warn';
@@ -1130,8 +1069,8 @@ function drawHealth() {
     cls = 'warn';
     msgs.push(`與 ccusage 對帳誤差 ${h.reconcile.pct.toFixed(2)}%，超過 ${h.reconcile.tolerancePct}% 容差。`);
   }
-  // Cost inside an unreadable transcript is missing from every number on the
-  // page. Silence there would look exactly like "you spent less".
+  // 讀不到的記錄檔裡的成本，不會出現在這個頁面的任何數字上。
+  // 這裡若保持沉默，看起來就跟「你花得比較少」一模一樣。
   const unread = h.analysis?.readErrors ?? [];
   if (unread.length) {
     cls = 'error';
@@ -1141,8 +1080,8 @@ function drawHealth() {
       `其中的成本沒有計入任何數字。範例：<code>${escapeHtml(unread[0].file)}</code>`,
     );
   }
-  // Without this the card just disappears, which reads as "no such spend"
-  // rather than "could not read it".
+  // 沒有這個，卡片就只是消失，那會被讀成「沒有這筆支出」，
+  // 而不是「我讀不到它」。
   if (state.overview?.localAgent?.error) {
     cls = 'warn';
     msgs.push(`讀不到 local agent 排程任務的紀錄（${escapeHtml(state.overview.localAgent.error)}），該筆支出未顯示。`);
@@ -1164,8 +1103,8 @@ function drawHealth() {
     未能歸因 ${usd(h.unattributed.cost)}（${h.unattributed.pct.toFixed(2)}%）`;
 }
 
-/* ============================== update check ============================== */
-/** Poll /api/health until the restarted server answers again. */
+/* ============================== 更新檢查 ============================== */
+/** 反覆輪詢 /api/health，直到重啟後的伺服器重新回應為止。 */
 async function waitForServer(ms = 120_000) {
   const t0 = Date.now();
   while (Date.now() - t0 < ms) {
@@ -1173,7 +1112,7 @@ async function waitForServer(ms = 120_000) {
     try {
       if ((await fetch('/api/health')).ok) return;
     } catch {
-      // still restarting
+      // 還在重啟中
     }
   }
   throw new Error('伺服器未在預期時間內重啟，請手動重新啟動（start.bat）');
@@ -1230,7 +1169,7 @@ function showUpdateToast(u) {
   });
 }
 
-/** Fire-and-forget on boot: an update-check failure must never break the dashboard. */
+/** 啟動時射後不理：更新檢查失敗絕不能把儀表板弄壞。 */
 async function checkUpdate() {
   try {
     const u = await api('/api/update-check');
@@ -1239,14 +1178,14 @@ async function checkUpdate() {
     if (localStorage.getItem('update-dismissed') === dismissKey) return;
     showUpdateToast(u);
   } catch {
-    // silent: the dashboard works fine without update info
+    // 安靜處理：就算沒有更新資訊，儀表板一樣運作正常
   }
 }
 
 /* ============================== TAB 7 ============================== */
 /**
- * Local agent mode: the desktop app's scheduled tasks. Off-books spend — see the
- * callout in the panel and localagent.js for why it stays out of 總成本.
+ * local agent mode：桌面版的排程任務。屬於帳外支出 ——
+ * 為什麼它不計入總成本，見面板上的說明區塊與 localagent.js。
  */
 function drawLocalAgent() {
   const d = state.localagent;
@@ -1254,10 +1193,9 @@ function drawLocalAgent() {
 
   const runs = d.runs ?? [];
 
-  // `available` is machine-level: this machine has local agent transcripts, so
-  // the tab exists. The date filter can still select a window with no runs in
-  // it — say what happened and where the data actually is, rather than showing
-  // $0.00 next to a dash and letting it read as broken.
+  // `available` 是「機器層級」的：這台機器有 local agent 的記錄，所以這個分頁存在。
+  // 但日期篩選仍然可能選到一段沒有任何執行的區間 —— 這時要說明發生了什麼、
+  // 以及資料實際在哪裡，而不是顯示一個 $0.00 配一個破折號，讓人以為壞掉了。
   $('#la-card-tasks').hidden = runs.length === 0;
   $('#la-card-runs').hidden = runs.length === 0;
   if (!runs.length) {
@@ -1275,10 +1213,10 @@ function drawLocalAgent() {
     return;
   }
   const scheduled = runs.filter((r) => r.scheduled);
-  // The steady-state number people actually want: what the unattended runs cost
-  // per firing, ignoring the expensive day you sat there tuning the task.
+  // 人們真正想看的穩定狀態數字：那些無人看管的執行「每次觸發」花多少錢，
+  // 不去算你坐在那邊調整任務的那個昂貴的日子。
   const avgScheduled = scheduled.length ? scheduled.reduce((s, r) => s + r.cost, 0) / scheduled.length : 0;
-  const last = runs[0]; // sorted newest first
+  const last = runs[0]; // 已依時間由新到舊排序
 
   $('#la-datadir').textContent = `資料來源：${d.dataDir}`;
   $('#kpi-localagent').innerHTML = `
@@ -1315,7 +1253,7 @@ function drawLocalAgent() {
       </tr>`).join('')}
     </tbody>`;
 
-  // Oldest-first along x so the chart reads left-to-right in time.
+  // x 軸由舊到新，讓圖表可以由左至右依時間閱讀。
   const series = [...runs].reverse();
   render('chart-la-runs', {
     type: 'bar',
@@ -1369,21 +1307,21 @@ function drawLocalAgent() {
 /* ============================== boot ============================== */
 
 /**
- * Every fetch path goes through here so the page is never silently busy.
- * Counted rather than boolean: the prompt filters can fire while a range
- * reload is still in flight, and the first one to finish must not clear the bar.
+ * 每一條 fetch 路徑都會經過這裡，讓頁面不會在無聲無息中處於忙碌狀態。
+ * 用計數而不是布林值：語句篩選可能在區間重新載入還沒回來時就被觸發，
+ * 而先完成的那一個不該把進度條清掉。
  */
 let inflight = 0;
 function setBusy(on) {
   inflight = Math.max(0, inflight + (on ? 1 : -1));
   const busy = inflight > 0;
   $('#progress').hidden = !busy;
-  // Dimming is for reloads only. While the skeleton is up there is nothing
-  // worth reading underneath, and fading it would just make the bones murky.
+  // 變暗效果只用於重新載入。骨架還在時，底下本來就沒有值得閱讀的東西，
+  // 再把它淡化只會讓那些骨架變得更混濁。
   document.body.classList.toggle('loading', busy && !document.body.classList.contains('booting'));
 }
 
-/** The seeded skeleton (index.html) stops being a placeholder and starts being a lie. */
+/** 預先放在 index.html 的骨架，過了這個點就不再是佔位符，而會變成謊言。 */
 function clearBootSkeleton() {
   document.body.classList.remove('booting');
   $('#kpi-overview').removeAttribute('aria-busy');
@@ -1391,9 +1329,9 @@ function clearBootSkeleton() {
 }
 
 /**
- * A load that failed has to say so. On boot there is nothing on screen yet, so
- * the skeleton is torn down too; on a refresh the previous numbers stay put with
- * the banner above them. The next successful load overwrites it via drawHealth().
+ * 載入失敗就必須講出來。啟動時畫面上還沒有任何東西，所以連骨架也一併拆掉；
+ * 重新整理時則保留原本的數字，只在上方加一條橫幅。
+ * 下一次成功載入時會由 drawHealth() 覆蓋掉它。
  */
 function showLoadError(err, { boot = false } = {}) {
   $('#banner').className = 'banner error';
@@ -1426,7 +1364,7 @@ async function fetchAll() {
     api(withRange('/api/sessions')),
     api(withRange('/api/projects')),
     api('/api/health'),
-    // Optional feature: a machine without local agent mode must not fail the load.
+    // 這是選用功能：沒有 local agent mode 的機器不該因此導致載入失敗。
     api(withRange('/api/localagent')).catch(() => ({ available: false, runs: [], byTask: [] })),
   ]);
   Object.assign(state, { overview, cachewrite, improvements, trend, prompts, sessions, projects, health, localagent });
@@ -1443,10 +1381,10 @@ async function fetchAll() {
     }
   }
 
-  // Only the visible tab draws — see showTab() for why hidden charts must not be built.
+  // 只有目前可見的分頁會繪製 —— 為什麼隱藏的圖表不能被建立，見 showTab()。
   showTab(document.querySelector('.tab.active')?.dataset.tab ?? 'overview');
   drawHealth();
-  clearBootSkeleton(); // real content has landed
+  clearBootSkeleton(); // 真正的內容已經進來了
 }
 
 const reloadPrompts = () => withBusy(async () => {
@@ -1459,13 +1397,12 @@ const reloadPrompts = () => withBusy(async () => {
 const DRAW = { overview: drawOverview, cachewrite: drawCacheWrite, improve: drawImprove, trend: drawTrend, prompts: drawPrompts, sessions: drawSessions, localagent: drawLocalAgent };
 
 /**
- * Show a tab and (re)build its charts.
+ * 切換到某個分頁，並（重新）建立它的圖表。
  *
- * Charts must be constructed while their panel is visible: a canvas created
- * inside a display:none panel measures 0x0, and Chart.js cannot recover it
- * afterwards — resize() on such an instance stays 0x0. So we redraw the tab's
- * charts on show. render() destroys the previous instance first, so this is cheap
- * and idempotent.
+ * 圖表必須在它所屬的面板「可見時」才能建立：在 display:none 的面板裡建立的 canvas
+ * 量到的尺寸是 0x0，而且 Chart.js 事後救不回來 —— 對這種實例呼叫 resize() 仍然是 0x0。
+ * 所以我們在顯示分頁時重繪它的圖表。render() 會先把前一個實例銷毀，
+ * 因此這個做法成本很低，而且具冪等性。
  */
 function showTab(name) {
   document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t.dataset.tab === name));
@@ -1480,7 +1417,7 @@ document.querySelectorAll('.tab').forEach((tab) => {
 $('#filter-project').addEventListener('change', reloadPrompts);
 $('#filter-limit').addEventListener('change', reloadPrompts);
 
-// Cost-trend period toggle (day / month / year) — re-buckets without refetching.
+// 成本趨勢的期間切換（日／月／年）—— 只重新分桶，不重新抓資料。
 document.querySelectorAll('#daily-period button').forEach((b) => {
   b.addEventListener('click', () => drawDailyTrend(b.dataset.p));
 });
@@ -1501,14 +1438,10 @@ for (const id of ['#date-since', '#date-until']) {
 /* ============================== export ============================== */
 /** The active range; falls back to the loaded data's first/last day when 「全部」. */
 function exportRange() {
-  let since = $('#date-since').value;
-  let until = $('#date-until').value;
-  if (!since || !until) {
-    const days = (state.overview?.daily ?? []).map((x) => x.period).sort();
-    since = since || days[0];
-    until = until || days[days.length - 1];
-  }
-  return { since, until };
+  return exportRangeFrom(
+    { since: $('#date-since').value, until: $('#date-until').value },
+    (state.overview?.daily ?? []).map((x) => x.period),
+  );
 }
 
 $('#export').addEventListener('click', () => {
@@ -1542,8 +1475,7 @@ $('#export').addEventListener('click', () => {
 
   $('#export-form').addEventListener('submit', async (e) => {
     e.preventDefault();
-    // Same cleanup as the server: no path chars, no `_` (the filename separator).
-    const empId = $('#export-empid').value.replace(/["'\\/:*?<>|_]/g, '').trim();
+    const empId = sanitizeEmpId($('#export-empid').value);
     const device = $('#export-device').value;
     if (!empId) {
       const box = $('#export-error');
@@ -1586,17 +1518,17 @@ $('#refresh').addEventListener('click', async (e) => {
   btn.disabled = true;
   btn.textContent = '重新整理中…';
   try {
-    // withBusy covers the POST too: dropping the caches is the slowest part of
-    // the round trip, and it used to run with no progress bar and no dimming —
-    // the button label was the only sign anything was happening.
-    // fetchAll rather than loadAll, so setBusy is not counted twice.
+    // withBusy 也涵蓋這個 POST：丟掉快取是整趟往返裡最慢的一段，
+    // 而它以前跑的時候既沒有進度條也沒有變暗 ——
+    // 按鈕上的文字是唯一能看出「有事在發生」的線索。
+    // 這裡用 fetchAll 而不是 loadAll，這樣 setBusy 才不會被計算兩次。
     await withBusy(async () => {
       await api('/api/refresh', { method: 'POST' });
       await fetchAll();
     });
   } catch (err) {
-    // Without this the rejection was swallowed and the page quietly kept showing
-    // stale numbers as if the refresh had worked.
+    // 沒有這段，那個 rejection 會被吞掉，頁面就會安靜地繼續顯示過期的數字，
+    // 好像重新整理成功了一樣。
     showLoadError(err);
   } finally {
     btn.disabled = false;
@@ -1608,7 +1540,7 @@ $('#modal-close').addEventListener('click', () => { $('#modal').hidden = true; }
 $('#modal').addEventListener('click', (e) => { if (e.target.id === 'modal') $('#modal').hidden = true; });
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') $('#modal').hidden = true; });
 
-// Theme toggle must beat the OS setting in both directions.
+// 深淺色切換在兩個方向上都必須蓋過作業系統的設定。
 $('#theme-toggle').addEventListener('click', () => {
   const cur = document.documentElement.getAttribute('data-theme');
   const next = cur === 'dark' ? 'light' : cur === 'light' ? 'dark'
@@ -1621,9 +1553,9 @@ $('#theme-toggle').addEventListener('click', () => {
 const saved = localStorage.getItem('theme');
 if (saved) document.documentElement.setAttribute('data-theme', saved);
 
-// Font zoom: enlarge/shrink the whole UI, persisted across sessions.
-// Reflects state into the instrument control — slider, filled track, the
-// live-growing A, and the mono % readout that lights up as reset when off 100%.
+// 字體縮放：放大／縮小整個 UI，並跨工作階段保存。
+// 會把狀態反映到那個儀表式控制項上 —— 滑桿、已填滿的軌道、會即時變大的 A，
+// 以及那個等寬字的 % 讀數（偏離 100% 時會亮起，表示可以重設）。
 function applyFontScale() {
   document.documentElement.style.zoom = fontScale;
   const f = (fontScale - FONT_MIN) / (FONT_MAX - FONT_MIN); // 0..1
@@ -1637,7 +1569,7 @@ function setFontScale(v) {
   fontScale = clampFont(v);
   localStorage.setItem('font-scale', String(fontScale));
   applyFontScale();
-  // Re-render charts so their canvas bitmaps stay crisp at the new zoom.
+  // 重新繪製圖表，讓它們的 canvas 點陣圖在新的縮放比例下維持清晰。
   showTab(document.querySelector('.tab.active')?.dataset.tab ?? 'overview');
 }
 $('#font-inc').addEventListener('click', () => setFontScale(fontScale + FONT_STEP));
