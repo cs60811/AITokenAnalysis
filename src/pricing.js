@@ -207,7 +207,7 @@ async function fetchModelsDev() {
 }
 
 /**
- * LiteLLM 為主，models.dev 只補「LiteLLM 還沒收錄的模型」。
+ * LiteLLM 為主，models.dev 只補它沒有的東西 —— 沒收錄的模型，以及殘缺條目缺掉的欄位。
  *
  * 這是那 3.23% 對帳缺口的修正。新模型發布後，LiteLLM 型錄要過幾天才跟上；在那之前
  * 它的訊息會照算 token、卻算不出金額 —— addPart()（attribute.js）對沒有費率的模型
@@ -224,15 +224,59 @@ function withFallbackRates(primary, fallback) {
   const rates = { ...primary };
   const filled = [];
   for (const [model, rec] of Object.entries(fallback ?? {})) {
-    if (rates[model]) continue;
-    rates[model] = rec;
-    filled.push(model);
+    const have = rates[model];
+    if (!have) {
+      rates[model] = rec;
+      filled.push(model);
+      continue;
+    }
+    // 逐「欄位」補，不是逐「模型」補。LiteLLM 也會出現殘缺條目 —— 本 repo 的
+    // prices.json 裡 gemini-2.5-flash 與 gpt-5.5 就都沒有快取寫入費率。整筆跳過的話，
+    // 一個殘缺的主來源條目會擋住一份完整的備用記錄，缺掉的欄位就以 $0 計費，
+    // 而 hasRates() 依然回報 true —— 又是一次橫幅和閘門都看不見的靜默少報。
+    // 已經有值的欄位絕不覆蓋：那才是「LiteLLM 為準」這個決策的落點。
+    const merged = { ...have };
+    let patched = false;
+    for (const f of RATE_FIELDS) {
+      if (typeof merged[f] !== 'number' && typeof rec[f] === 'number') {
+        merged[f] = rec[f];
+        patched = true;
+      }
+    }
+    if (patched) {
+      rates[model] = merged;
+      filled.push(model);
+    }
   }
   return { rates, filled: filled.sort() };
 }
 
 async function readJson(file) {
   return JSON.parse(await fsp.readFile(file, 'utf8'));
+}
+
+/**
+ * 磁碟上最後一份可用的「備用費率」，供 models.dev 短暫連不上時使用。
+ *
+ * 少了這個，一次逾時就會讓那 3.23% 的 bug 整個回來：LiteLLM 還活著、`filled` 是空的，
+ * 於是我們把只有 LiteLLM 的費率表寫回快取，把上一輪替新模型補上的那筆費率抹掉 ——
+ * 那個模型的支出又一次從總額裡消失。加價倍率早就有這道防線（diskFastMultipliers），
+ * 費率沒有理由沒有。
+ */
+async function diskFallbackRates() {
+  for (const file of [PRICES_CACHE_FILE, PRICES_SNAPSHOT_FILE]) {
+    try {
+      const doc = await readJson(file);
+      const out = {};
+      for (const m of doc?.fallbackModels ?? []) {
+        if (doc.rates?.[m]) out[m] = doc.rates[m];
+      }
+      if (Object.keys(out).length) return out;
+    } catch {
+      // 試下一個檔案
+    }
+  }
+  return null;
 }
 
 /** 磁碟上最後一份可用的倍率，供 models.dev 短暫連不上時使用。 */
@@ -274,9 +318,12 @@ export async function initPricing() {
   // 遠比「沒有」要好得多。
   let fastMultipliers = modelsDev?.fastMultipliers ?? null;
   fastMultipliers ??= await diskFastMultipliers();
+  // 同理：即時抓到的優先，抓不到就用磁碟上最後一份，絕不讓它變成「沒有」。
+  let fallbackRates = modelsDev?.rates ?? null;
+  fallbackRates ??= await diskFallbackRates();
 
   try {
-    const { rates, filled } = withFallbackRates(await fetchLiteLLM(), modelsDev?.rates);
+    const { rates, filled } = withFallbackRates(await fetchLiteLLM(), fallbackRates);
     setState({
       rates,
       fastMultipliers,
@@ -305,7 +352,7 @@ export async function initPricing() {
       const doc = await readJson(file);
       // 磁碟上的副本一樣會漏掉新模型 —— 打包時的快照更是如此（它是發版當天凍結的），
       // 所以這條路徑同樣讓 models.dev 補漏。
-      const { rates, filled } = withFallbackRates(doc.rates ?? doc, modelsDev?.rates);
+      const { rates, filled } = withFallbackRates(doc.rates ?? doc, fallbackRates);
       setState({
         rates,
         // 即時抓到的 models.dev 仍然優先於磁碟上過期的副本。
@@ -326,11 +373,11 @@ export async function initPricing() {
 
   // 磁碟上兩份都讀不到，但 models.dev 還活著。它至少涵蓋每一個 Claude 模型，
   // 而這裡的替代選項是「完全沒有費率」—— 那會讓整個儀表板變成一排「—」。
-  if (modelsDev?.rates && Object.keys(modelsDev.rates).length) {
+  if (fallbackRates && Object.keys(fallbackRates).length) {
     setState({
-      rates: modelsDev.rates,
+      rates: fallbackRates,
       fastMultipliers,
-      fallbackModels: Object.keys(modelsDev.rates).sort(),
+      fallbackModels: Object.keys(fallbackRates).sort(),
       source: 'models.dev',
       fetchedAt: new Date().toISOString(),
       error: state.error,

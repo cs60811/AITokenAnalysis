@@ -5,10 +5,8 @@
  * 只要 ccusage 改了行為，或解析器偏掉了，這些檢查會大聲地失敗，
  * 而不是安靜地把金額報錯。
  */
-import fs from 'node:fs';
-import path from 'node:path';
 import { analyzeAll, analyzeSession } from './attribute.js';
-import { IGNORED_DIRS, WORKFLOWS_DIR, discoverSessions } from './discover.js';
+import { discoverSessions } from './discover.js';
 import { dedupKey, isBillable, isRealPrompt, readLines } from './parser.js';
 import { costOf, initPricing, pricingStatus, unknownFastModels } from './pricing.js';
 import * as ccusage from './ccusage.js';
@@ -24,39 +22,6 @@ const check = (pass, label, detail = '') => {
 };
 
 const near = (a, b, tol) => Math.abs(a - b) <= tol;
-
-/**
- * 磁碟上 `workflows/` 底下真正存在的記錄檔數量。
- *
- * 用來把「這台機器沒跑過 workflow」和「探索邏輯不再認得 workflow 這一層」分開 ——
- * 兩者都會讓計數變成 0，但只有後者是迴歸。
- *
- * 數「檔案」而不是「目錄」，有兩個理由：一個空的 workflows/ 目錄同樣代表沒有執行過
- * （discover.js 的 workflowRunsIn 也是這樣判定的，沒有記錄檔就不算一次執行），
- * 而且有了實際檔數，就能連「探索只找到一部分」都一起抓出來，不只是「完全找不到」。
- * 同樣跳過 IGNORED_DIRS，否則那些目錄底下的東西會被算進來 —— 而 discover 從不掃它們。
- */
-function workflowFilesOnDisk(root = CLAUDE_PROJECTS_DIR) {
-  let n = 0;
-  const walk = (dir, depth, inWorkflows) => {
-    if (depth > 5) return;
-    let entries;
-    try {
-      entries = fs.readdirSync(dir, { withFileTypes: true });
-    } catch {
-      return; // 讀不到的目錄無話可說
-    }
-    for (const e of entries) {
-      if (e.isFile()) {
-        if (inWorkflows && e.name.endsWith('.jsonl')) n++;
-      } else if (e.isDirectory() && !IGNORED_DIRS.has(e.name)) {
-        walk(path.join(dir, e.name), depth + 1, inWorkflows || e.name === WORKFLOWS_DIR);
-      }
-    }
-  };
-  walk(root, 0, false);
-  return n;
-}
 
 async function main() {
   const st = await initPricing();
@@ -77,18 +42,15 @@ async function main() {
     for (const f of s.workflows.values()) wf += f.length;
   }
   check(main + sub + wf > 0, 'found transcripts', `main=${main} subagent=${sub} workflow=${wf}`);
-  // 「有沒有 workflow 記錄」是這台機器的狀態，不是程式的性質 —— 保留期會清掉它們，
-  // 而且不是每個人都跑 workflow。所以先問磁碟：一個檔案都沒有就 SKIP；
-  // 檔案在、我們卻沒有全部讀到，那才是探索邏輯壞了，要大聲地失敗。
-  const wfOnDisk = workflowFilesOnDisk();
-  if (wf === 0 && wfOnDisk === 0) {
-    console.log('  SKIP  no workflow runs on this machine (none on disk); tier untestable here');
+  // 「有沒有 workflow 記錄」是這台機器的狀態，不是程式的性質：保留期會清掉它們，
+  // 而且不是每個人都跑 workflow。所以這裡只在真的有時才斷言。
+  // 「探索不再認得 workflow 這一層」那個迴歸類別，是由 test/discover.test.js
+  // 用 fixture 守住的（含空的 run 目錄、散落在 workflows/ 底下的 jsonl 等邊界），
+  // 那才是它該被測的地方 —— 不是靠某台機器上剛好有沒有這類資料。
+  if (wf === 0) {
+    console.log('  SKIP  no workflow runs in this corpus; tier covered by test/discover.test.js');
   } else {
-    check(
-      wf > 0 && wf === wfOnDisk,
-      'workflow tier is present (the tier ccusage session drops)',
-      `${wf} files found, ${wfOnDisk} on disk`,
-    );
+    check(wf > 0, 'workflow tier is present (the tier ccusage session drops)', `${wf} files`);
   }
 
   console.log('\n2. Cost formula — exact regression vs ccusage (8 dp)');
@@ -98,6 +60,10 @@ async function main() {
     // 用 UUID 釘住的 session 終究會消失。它不在，不代表程式錯了，代表這台機器已經
     // 量不到這條迴歸 —— 大聲說出來，但不要用一個永遠修不好的 FAIL 去堵住閘門。
     console.log(`  SKIP  anchor session ${ANCHOR_SID} no longer on disk (retention); cost-formula regression untestable here`);
+    // 第 3 項也活在這個 anchor 上。不明講的話它會整段消失不見 ——
+    // 一份沒印出任何東西的報告，讀起來跟「這項通過了」一模一樣。
+    console.log('\n3. Dedup invariant');
+    console.log('  SKIP  needs the anchor session (see check 2); invariant covered by test/attribute.test.js');
   } else {
     const seen = new Set();
     const by = {};

@@ -513,6 +513,45 @@ describe('models.dev rate fallback', () => {
     expect(JSON.parse(fs.readFileSync(CACHE, 'utf8')).fallbackModels).toEqual(['newcomer']);
   });
 
+  // LiteLLM 也會出現只有 input/output 的殘缺條目（本 repo 的 prices.json 裡
+  // gemini-2.5-flash、gpt-5.5 就是）。整筆跳過會讓缺掉的欄位以 $0 計費。
+  it('patches missing rate fields on a partial LiteLLM entry without overriding the ones it has', async () => {
+    stubFetch({
+      [LITELLM]: { m: { input_cost_per_token: 0.000009, output_cost_per_token: 0.00009 } },
+      [MODELSDEV]: anthropicDoc({
+        m: { cost: { input: 10, output: 50, cache_read: 1, cache_write: 12.5 } },
+      }),
+    });
+    await initPricing();
+    const r = ratesFor('m');
+    // LiteLLM 自己有的兩項原封不動。
+    expect(r.input_cost_per_token).toBe(0.000009);
+    expect(r.output_cost_per_token).toBe(0.00009);
+    // 缺的三項由備用型錄補上，而不是留空以 $0 計費。
+    expect(r.cache_creation_input_token_cost).toBe(0.0000125);
+    expect(r.cache_creation_input_token_cost_above_1hr).toBe(0.00002);
+    expect(r.cache_read_input_token_cost).toBe(0.000001);
+    expect(pricingStatus().fallbackModels).toEqual(['m']);
+  });
+
+  // 一次 models.dev 逾時若把磁碟上的備用費率洗掉，那 3.23% 的缺口就整個回來了。
+  it('reuses the last good on-disk fallback rate when models.dev is unreachable', async () => {
+    fs.writeFileSync(
+      CACHE,
+      JSON.stringify({
+        rates: { newcomer: { input_cost_per_token: 0.00001, output_cost_per_token: 0.00005 } },
+        fallbackModels: ['newcomer'],
+      }),
+    );
+    // LiteLLM 還活著、但仍未收錄 newcomer；models.dev 這次連不上。
+    stubFetch({ [LITELLM]: { other: { input_cost_per_token: 1 } }, [MODELSDEV]: new Error('down') });
+    const state = await initPricing();
+    expect(state.source).toBe('litellm');
+    expect(ratesFor('newcomer').input_cost_per_token).toBe(0.00001);
+    // 而且要繼續留在磁碟上，不能被這一輪的寫入抹掉。
+    expect(JSON.parse(fs.readFileSync(CACHE, 'utf8')).fallbackModels).toEqual(['newcomer']);
+  });
+
   it('fills gaps in the bundled snapshot too, so a blocked LiteLLM cannot zero out a new model', async () => {
     stubFetch({
       [LITELLM]: new Error('GitHub blocked'),
