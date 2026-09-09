@@ -552,6 +552,29 @@ describe('models.dev rate fallback', () => {
     expect(JSON.parse(fs.readFileSync(CACHE, 'utf8')).fallbackModels).toEqual(['newcomer']);
   });
 
+  // 兩項防線的交互作用：磁碟上存的是「已合併」的記錄，下一輪 models.dev 又掛掉時，
+  // 它會被當成備用型錄再對殘缺的 LiteLLM 條目合併一次。必須是幂等的，
+  // 否則反覆重啟會讓費率愈補愈歪。
+  it('re-merges an on-disk merged record against a partial LiteLLM entry idempotently', async () => {
+    const merged = {
+      input_cost_per_token: 0.000009,
+      output_cost_per_token: 0.00009,
+      cache_creation_input_token_cost: 0.0000125,
+      cache_creation_input_token_cost_above_1hr: 0.00002,
+      cache_read_input_token_cost: 0.000001,
+    };
+    fs.writeFileSync(CACHE, JSON.stringify({ rates: { m: merged }, fallbackModels: ['m'] }));
+    stubFetch({
+      // LiteLLM 仍然只有 input/output 這兩項。
+      [LITELLM]: { m: { input_cost_per_token: 0.000009, output_cost_per_token: 0.00009 } },
+      [MODELSDEV]: new Error('down'),
+    });
+    await initPricing();
+    expect(ratesFor('m')).toEqual(merged);
+    expect(pricingStatus().fallbackModels).toEqual(['m']);
+    expect(JSON.parse(fs.readFileSync(CACHE, 'utf8')).rates.m).toEqual(merged);
+  });
+
   it('fills gaps in the bundled snapshot too, so a blocked LiteLLM cannot zero out a new model', async () => {
     stubFetch({
       [LITELLM]: new Error('GitHub blocked'),
