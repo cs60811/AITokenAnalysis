@@ -456,8 +456,8 @@ describe('models.dev rate fallback', () => {
     stubFetch({
       [LITELLM]: {},
       [MODELSDEV]: {
-        reseller: { models: { cheap: { cost: { input: 1, output: 1 } } } },
-        anthropic: { models: { real: { cost: { input: 5, output: 25 } } } },
+        reseller: { models: { cheap: { cost: { input: 1, output: 1, cache_read: 0.1 } } } },
+        anthropic: { models: { real: { cost: { input: 5, output: 25, cache_read: 0.5 } } } },
       },
     });
     await initPricing();
@@ -478,10 +478,45 @@ describe('models.dev rate fallback', () => {
     expect(pricingStatus().fallbackModels).toEqual([]);
   });
 
+  it('derives the 5m cache-write rate when models.dev omits it, so it is never billed at $0', async () => {
+    stubFetch({
+      [LITELLM]: {},
+      [MODELSDEV]: anthropicDoc({ nowrite: { cost: { input: 10, output: 50, cache_read: 1 } } }),
+    });
+    await initPricing();
+    const r = ratesFor('nowrite');
+    // 5 分鐘＝input 的 1.25 倍、1 小時＝2 倍，兩者都必須有值。
+    expect(r.cache_creation_input_token_cost).toBe(0.0000125);
+    expect(r.cache_creation_input_token_cost_above_1hr).toBe(0.00002);
+    expect(cacheWrite1hRateOf(r)).toBe(0.00002);
+  });
+
+  // 快取讀取的倍率並不一致（opus-5 是 0.1 倍、fable-5-1 只有 0.025 倍），推不出來，
+  // 而它通常是 token 量最大的一類 —— 當 $0 會是最大的一個謊，寧可讓閘門擋下來。
+  it('refuses to price a model whose cache-read rate is unpublished', async () => {
+    stubFetch({
+      [LITELLM]: {},
+      [MODELSDEV]: anthropicDoc({ noread: { cost: { input: 10, output: 50, cache_write: 12.5 } } }),
+    });
+    await initPricing();
+    expect(hasRates('noread')).toBe(false);
+    expect(pricingStatus().fallbackModels).toEqual([]);
+  });
+
+  it('records which rates came from the fallback so a restart cannot launder them', async () => {
+    stubFetch({
+      [LITELLM]: { known: { input_cost_per_token: 1 } },
+      [MODELSDEV]: anthropicDoc({ newcomer: { cost: { input: 10, output: 50, cache_read: 1 } } }),
+    });
+    await initPricing();
+    // 磁碟快取要帶著這份名單，否則下一次走 cache 路徑就會把「這是估值」洗掉。
+    expect(JSON.parse(fs.readFileSync(CACHE, 'utf8')).fallbackModels).toEqual(['newcomer']);
+  });
+
   it('fills gaps in the bundled snapshot too, so a blocked LiteLLM cannot zero out a new model', async () => {
     stubFetch({
       [LITELLM]: new Error('GitHub blocked'),
-      [MODELSDEV]: anthropicDoc({ newcomer: { cost: { input: 10, output: 50 } } }),
+      [MODELSDEV]: anthropicDoc({ newcomer: { cost: { input: 10, output: 50, cache_read: 1 } } }),
     });
     const state = await initPricing();
     expect(state.source).toBe('snapshot');

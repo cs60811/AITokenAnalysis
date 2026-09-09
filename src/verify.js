@@ -8,7 +8,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { analyzeAll, analyzeSession } from './attribute.js';
-import { discoverSessions } from './discover.js';
+import { IGNORED_DIRS, WORKFLOWS_DIR, discoverSessions } from './discover.js';
 import { dedupKey, isBillable, isRealPrompt, readLines } from './parser.js';
 import { costOf, initPricing, pricingStatus, unknownFastModels } from './pricing.js';
 import * as ccusage from './ccusage.js';
@@ -26,15 +26,20 @@ const check = (pass, label, detail = '') => {
 const near = (a, b, tol) => Math.abs(a - b) <= tol;
 
 /**
- * 這份語料裡到底有沒有 `subagents/workflows` 這個目錄。
+ * 磁碟上 `workflows/` 底下真正存在的記錄檔數量。
  *
  * 用來把「這台機器沒跑過 workflow」和「探索邏輯不再認得 workflow 這一層」分開 ——
  * 兩者都會讓計數變成 0，但只有後者是迴歸。
+ *
+ * 數「檔案」而不是「目錄」，有兩個理由：一個空的 workflows/ 目錄同樣代表沒有執行過
+ * （discover.js 的 workflowRunsIn 也是這樣判定的，沒有記錄檔就不算一次執行），
+ * 而且有了實際檔數，就能連「探索只找到一部分」都一起抓出來，不只是「完全找不到」。
+ * 同樣跳過 IGNORED_DIRS，否則那些目錄底下的東西會被算進來 —— 而 discover 從不掃它們。
  */
-function anyWorkflowDirOnDisk(root = CLAUDE_PROJECTS_DIR) {
-  let found = false;
-  const walk = (dir, depth) => {
-    if (found || depth > 3) return;
+function workflowFilesOnDisk(root = CLAUDE_PROJECTS_DIR) {
+  let n = 0;
+  const walk = (dir, depth, inWorkflows) => {
+    if (depth > 5) return;
     let entries;
     try {
       entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -42,16 +47,15 @@ function anyWorkflowDirOnDisk(root = CLAUDE_PROJECTS_DIR) {
       return; // 讀不到的目錄無話可說
     }
     for (const e of entries) {
-      if (!e.isDirectory()) continue;
-      if (e.name === 'workflows') {
-        found = true;
-        return;
+      if (e.isFile()) {
+        if (inWorkflows && e.name.endsWith('.jsonl')) n++;
+      } else if (e.isDirectory() && !IGNORED_DIRS.has(e.name)) {
+        walk(path.join(dir, e.name), depth + 1, inWorkflows || e.name === WORKFLOWS_DIR);
       }
-      walk(path.join(dir, e.name), depth + 1);
     }
   };
-  walk(root, 0);
-  return found;
+  walk(root, 0, false);
+  return n;
 }
 
 async function main() {
@@ -74,12 +78,17 @@ async function main() {
   }
   check(main + sub + wf > 0, 'found transcripts', `main=${main} subagent=${sub} workflow=${wf}`);
   // 「有沒有 workflow 記錄」是這台機器的狀態，不是程式的性質 —— 保留期會清掉它們，
-  // 而且不是每個人都跑 workflow。所以先問磁碟：目錄真的不存在就 SKIP；
-  // 目錄在、我們卻讀不出執行，那才是探索邏輯壞了，要大聲地失敗。
-  if (wf === 0 && !anyWorkflowDirOnDisk()) {
+  // 而且不是每個人都跑 workflow。所以先問磁碟：一個檔案都沒有就 SKIP；
+  // 檔案在、我們卻沒有全部讀到，那才是探索邏輯壞了，要大聲地失敗。
+  const wfOnDisk = workflowFilesOnDisk();
+  if (wf === 0 && wfOnDisk === 0) {
     console.log('  SKIP  no workflow runs on this machine (none on disk); tier untestable here');
   } else {
-    check(wf > 0, 'workflow tier is present (the tier ccusage session drops)', `${wf} files`);
+    check(
+      wf > 0 && wf === wfOnDisk,
+      'workflow tier is present (the tier ccusage session drops)',
+      `${wf} files found, ${wfOnDisk} on disk`,
+    );
   }
 
   console.log('\n2. Cost formula — exact regression vs ccusage (8 dp)');

@@ -130,35 +130,40 @@ const PER_MILLION = 1e6;
 const MODELSDEV_RATE_PROVIDER = 'anthropic';
 
 /**
- * Anthropic 公布的 1 小時快取寫入費率是 input 的 2 倍。
+ * Anthropic 公布的快取寫入費率，以 input 的倍率表示。
  *
- * models.dev 只有一個 `cache_write` 欄位（也就是 5 分鐘那個），沒有 1 小時的版本，
- * 所以 1 小時費率由 input 推導。這不是猜的：兩份型錄都有收錄的 14 個 Claude 模型，
- * LiteLLM 的 `above_1hr ÷ input` 全部恰為 2.000、`cache_write ÷ input` 全部恰為 1.250。
- * 少了這一步，靠 fallback 定價的模型其 1 小時寫入會被當成 5 分鐘價（1.25 倍）計費。
+ * models.dev 只有一個 `cache_write` 欄位（就是 5 分鐘那個），沒有 1 小時的版本，
+ * 所以 1 小時一律由 input 推導，5 分鐘則是「沒公布才推導」。這兩個倍率不是猜的：
+ * 兩份型錄都收錄的 14 個 Claude 模型，LiteLLM 的 `above_1hr ÷ input` 全部恰為
+ * 2.000、`cache_write ÷ input` 全部恰為 1.250。
+ *
+ * 兩者都要推導，否則會做出一份「只有一半」的費率表：補了 1 小時卻讓 5 分鐘留空，
+ * 會讓 5 分鐘寫入以 $0 計費，而 hasRates() 依然回報 true —— 於是橫幅和 verify
+ * 第 7 項都看不見它，正好是這次要修掉的那種靜默少報。
  */
-const CACHE_WRITE_1H_MULTIPLIER = 2;
+const CACHE_WRITE_MULTIPLIERS = { write5m: 1.25, write1h: 2 };
 
 /**
  * 把 models.dev 的 `cost` 區塊轉成我們的費率欄位。
  *
- * 只映射真的有公布的欄位（外加上面那個 1 小時的推導）—— 憑空補一個沒公布的費率，
- * 跟少報一樣是在說謊。缺 input／output 的項目直接視為不可定價。
+ * 快取「讀取」費率絕不推導，缺了就整筆視為不可定價。它的倍率並不一致
+ * （實測 claude-opus-5 是 input 的 0.1 倍，claude-fable-5-1 只有 0.025 倍），
+ * 所以推不出來；而快取讀取通常是 token 量最大的一類，把它當 $0 是這裡能犯的
+ * 最大一個謊。寧可讓它落進第 7 項那道閘門大聲失敗，也不要靜默少報。
  */
 function ratesFromModelsDev(cost) {
   if (typeof cost?.input !== 'number' || typeof cost?.output !== 'number') return null;
-  const rec = {
-    input_cost_per_token: cost.input / PER_MILLION,
-    output_cost_per_token: cost.output / PER_MILLION,
-    cache_creation_input_token_cost_above_1hr: (cost.input * CACHE_WRITE_1H_MULTIPLIER) / PER_MILLION,
+  if (typeof cost.cache_read !== 'number') return null;
+  const perToken = (n) => n / PER_MILLION;
+  const write5m =
+    typeof cost.cache_write === 'number' ? cost.cache_write : cost.input * CACHE_WRITE_MULTIPLIERS.write5m;
+  return {
+    input_cost_per_token: perToken(cost.input),
+    output_cost_per_token: perToken(cost.output),
+    cache_creation_input_token_cost: perToken(write5m),
+    cache_creation_input_token_cost_above_1hr: perToken(cost.input * CACHE_WRITE_MULTIPLIERS.write1h),
+    cache_read_input_token_cost: perToken(cost.cache_read),
   };
-  if (typeof cost.cache_write === 'number') {
-    rec.cache_creation_input_token_cost = cost.cache_write / PER_MILLION;
-  }
-  if (typeof cost.cache_read === 'number') {
-    rec.cache_read_input_token_cost = cost.cache_read / PER_MILLION;
-  }
-  return rec;
 }
 
 /**
@@ -169,8 +174,8 @@ function ratesFromModelsDev(cost) {
  * `claude-opus-5-fast` 這筆資料，也沒有速度這個維度，所以在這份語料上有 165 則訊息
  * 被以標準費率計費，全域總額比 `ccusage daily` 少了 2.06%。models.dev 把它放在
  * `experimental.modes.fast`，判斷依據正是我們從記錄裡讀的同一個欄位
- * （`provider.body.speed === "fast"`）。我們只取比值，不取絕對費率 —— models.dev 沒有
- * 5m/1h 快取寫入拆分的概念（已驗證：opus-4-8 與 opus-5 四項皆為 2.00 倍）。
+ * （`provider.body.speed === "fast"`）。倍率只取比值，因為 models.dev 沒有 5m/1h
+ * 快取寫入拆分的概念（已驗證：opus-4-8 與 opus-5 四項皆為 2.00 倍）。
  *
  * 備用費率 —— 見 withFallbackRates：新模型會比 LiteLLM 型錄先到。
  */
@@ -283,7 +288,9 @@ export async function initPricing() {
     await fsp.mkdir(CACHE_DIR, { recursive: true });
     await fsp.writeFile(
       PRICES_CACHE_FILE,
-      JSON.stringify({ fetchedAt: state.fetchedAt, rates, fastMultipliers }, null, 2),
+      // fallbackModels 也要一起寫：少了它，下一次改走 cache 路徑時就會把「這幾筆
+      // 是備用型錄推導出來的估值」這件事洗掉，估值照用、來源卻報成 cache。
+      JSON.stringify({ fetchedAt: state.fetchedAt, rates, fastMultipliers, fallbackModels: filled }, null, 2),
     );
     return state;
   } catch (err) {
@@ -303,7 +310,10 @@ export async function initPricing() {
         rates,
         // 即時抓到的 models.dev 仍然優先於磁碟上過期的副本。
         fastMultipliers: fastMultipliers ?? doc.fastMultipliers ?? null,
-        fallbackModels: filled,
+        // 這份檔案裡本來就是估值的那幾筆，連同這一輪新補的一起帶下去。
+        fallbackModels: [...new Set([...(doc.fallbackModels ?? []), ...filled])]
+          .filter((m) => rates[m])
+          .sort(),
         source,
         fetchedAt: doc.fetchedAt ?? null,
         error: state.error,
@@ -464,7 +474,15 @@ export async function writeSnapshot(models) {
     // 加價倍率也要一起打包，否則離線的桌面版會少報 fast 模式的成本。
     if (state.fastMultipliers?.[m]) fastMultipliers[m] = state.fastMultipliers[m];
   }
-  const doc = { fetchedAt: state.fetchedAt ?? new Date().toISOString(), rates, fastMultipliers };
+  // 快照裡哪幾筆是備用型錄推導出來的，要一起記下來 —— 否則打包進 app 的估值
+  // 會在離線啟動時被當成 LiteLLM 的權威費率。
+  const fallback = new Set(state.fallbackModels ?? []);
+  const doc = {
+    fetchedAt: state.fetchedAt ?? new Date().toISOString(),
+    rates,
+    fastMultipliers,
+    fallbackModels: Object.keys(rates).filter((m) => fallback.has(m)).sort(),
+  };
   await fsp.writeFile(PRICES_SNAPSHOT_FILE, JSON.stringify(doc, null, 2));
   return Object.keys(rates).length;
 }
@@ -475,7 +493,7 @@ export function loadSnapshotSync() {
   setState({
     rates: doc.rates ?? doc,
     fastMultipliers: doc.fastMultipliers ?? null,
-    fallbackModels: [],
+    fallbackModels: doc.fallbackModels ?? [],
     source: 'snapshot',
     fetchedAt: doc.fetchedAt ?? null,
     error: null,

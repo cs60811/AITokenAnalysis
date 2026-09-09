@@ -2,12 +2,17 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { CLAUDE_PROJECTS_DIR } from './config.js';
 
-/** 專案底下不屬於 session 的目錄。 */
-const IGNORED_DIRS = new Set(['memory', 'tool-results']);
+/**
+ * 專案底下不屬於 session 的目錄。
+ *
+ * 一併匯出，因為 verify.js 也要用同一份定義去掃磁碟 —— 它若跳過的目錄和這裡不同，
+ * 那道檢查就會拿「兩種不同的語料」互相比較。
+ */
+export const IGNORED_DIRS = new Set(['memory', 'tool-results']);
 
 /** Agent 記錄放在 <sid>/subagents/ 底下，workflow 的執行則再深一層。 */
 const SUBAGENTS_DIR = 'subagents';
-const WORKFLOWS_DIR = 'workflows';
+export const WORKFLOWS_DIR = 'workflows';
 const JSONL_EXT = '.jsonl';
 
 const entriesIn = (dir) => fs.readdirSync(dir, { withFileTypes: true });
