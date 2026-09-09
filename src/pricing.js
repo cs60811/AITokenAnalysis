@@ -39,9 +39,11 @@ export function billingModelOf(usage, model) {
 
 let state = {
   rates: null,
-  /** model -> fast 模式的價格倍率（見 fetchFastMultipliers） */
+  /** model -> fast 模式的價格倍率（見 fetchModelsDev） */
   fastMultipliers: null,
-  /** 'litellm' | 'cache' | 'snapshot' */
+  /** 主來源沒收錄、改由 models.dev 補上費率的模型（見 withFallbackRates） */
+  fallbackModels: [],
+  /** 'litellm' | 'cache' | 'snapshot' | 'models.dev' */
   source: null,
   fetchedAt: null,
   error: null,
@@ -111,40 +113,117 @@ async function fetchLiteLLM() {
   }
 }
 
+/** models.dev 以「每百萬 token」報價；本模組內部一律用「每 token」。 */
+const PER_MILLION = 1e6;
+
 /**
- * fast 模式的價格倍率，以模型為鍵。
+ * models.dev 上唯一可信的「絕對費率」發布者。
  *
- * Claude Code 的 fast 模式（`/fast`）會用加價對同一個模型計費，並在每則這類訊息上
- * 標記 `usage.speed === "fast"`。LiteLLM 完全沒有建模這件事 —— 它沒有
- * `claude-opus-5-fast` 這筆資料，也沒有速度這個維度 —— 所以在這份語料上有 165 則
- * 訊息被以標準費率計費，全域總額比 `ccusage daily` 少了 2.06%。
+ * 同一個 model id 會出現在幾十個供應商底下，價格各不相同（實測：`claude-fable-5-1`
+ * 在 venice 是 12/60、在 302ai 完全沒有快取費率，`claude-opus-4-8` 在 unorouter 是
+ * 0.425/2.125）。走訪「所有」供應商再讓後寫入者覆蓋前者，等於隨機挑一家轉售商的牌價，
+ * 所以費率只取 anthropic 這一份。
  *
- * models.dev 把它放在 `experimental.modes.fast`，判斷依據正是我們從記錄裡讀的
- * 同一個欄位（`provider.body.speed === "fast"`）。我們只取「比值」，不取絕對費率：
- * models.dev 沒有 5m/1h 快取寫入拆分的概念，那部分以 LiteLLM 為準；而目前每個有
- * 公布加價的模型，其 input/output/read/write 四項的倍率都一致
- * （已驗證：opus-4-8 與 opus-5 四項皆為 2.00 倍）。
+ * 加價倍率則相反，仍走全部供應商：倍率是「同一個供應商」的 fast.input ÷ base.input，
+ * 是個相對值，不受發布者的牌價高低影響。
  */
-async function fetchFastMultipliers() {
+const MODELSDEV_RATE_PROVIDER = 'anthropic';
+
+/**
+ * Anthropic 公布的 1 小時快取寫入費率是 input 的 2 倍。
+ *
+ * models.dev 只有一個 `cache_write` 欄位（也就是 5 分鐘那個），沒有 1 小時的版本，
+ * 所以 1 小時費率由 input 推導。這不是猜的：兩份型錄都有收錄的 14 個 Claude 模型，
+ * LiteLLM 的 `above_1hr ÷ input` 全部恰為 2.000、`cache_write ÷ input` 全部恰為 1.250。
+ * 少了這一步，靠 fallback 定價的模型其 1 小時寫入會被當成 5 分鐘價（1.25 倍）計費。
+ */
+const CACHE_WRITE_1H_MULTIPLIER = 2;
+
+/**
+ * 把 models.dev 的 `cost` 區塊轉成我們的費率欄位。
+ *
+ * 只映射真的有公布的欄位（外加上面那個 1 小時的推導）—— 憑空補一個沒公布的費率，
+ * 跟少報一樣是在說謊。缺 input／output 的項目直接視為不可定價。
+ */
+function ratesFromModelsDev(cost) {
+  if (typeof cost?.input !== 'number' || typeof cost?.output !== 'number') return null;
+  const rec = {
+    input_cost_per_token: cost.input / PER_MILLION,
+    output_cost_per_token: cost.output / PER_MILLION,
+    cache_creation_input_token_cost_above_1hr: (cost.input * CACHE_WRITE_1H_MULTIPLIER) / PER_MILLION,
+  };
+  if (typeof cost.cache_write === 'number') {
+    rec.cache_creation_input_token_cost = cost.cache_write / PER_MILLION;
+  }
+  if (typeof cost.cache_read === 'number') {
+    rec.cache_read_input_token_cost = cost.cache_read / PER_MILLION;
+  }
+  return rec;
+}
+
+/**
+ * 從 models.dev 取兩樣東西：fast 模式的加價倍率，以及一份備用費率表。
+ *
+ * 倍率 —— Claude Code 的 fast 模式（`/fast`）會用加價對同一個模型計費，並在每則這類
+ * 訊息上標記 `usage.speed === "fast"`。LiteLLM 完全沒有建模這件事：它沒有
+ * `claude-opus-5-fast` 這筆資料，也沒有速度這個維度，所以在這份語料上有 165 則訊息
+ * 被以標準費率計費，全域總額比 `ccusage daily` 少了 2.06%。models.dev 把它放在
+ * `experimental.modes.fast`，判斷依據正是我們從記錄裡讀的同一個欄位
+ * （`provider.body.speed === "fast"`）。我們只取比值，不取絕對費率 —— models.dev 沒有
+ * 5m/1h 快取寫入拆分的概念（已驗證：opus-4-8 與 opus-5 四項皆為 2.00 倍）。
+ *
+ * 備用費率 —— 見 withFallbackRates：新模型會比 LiteLLM 型錄先到。
+ */
+async function fetchModelsDev() {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), LITELLM_TIMEOUT_MS);
   try {
     const res = await fetch(MODELSDEV_PRICES_URL, { signal: ctrl.signal });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const doc = await res.json();
-    const out = {};
+    const fastMultipliers = {};
     for (const provider of Object.values(doc)) {
       for (const [id, m] of Object.entries(provider?.models ?? {})) {
         const fast = m?.experimental?.modes?.fast?.cost;
         const base = m?.cost;
         if (!fast || !base?.input) continue;
-        out[id] = fast.input / base.input;
+        fastMultipliers[id] = fast.input / base.input;
       }
     }
-    return out;
+    const rates = {};
+    for (const [id, m] of Object.entries(doc[MODELSDEV_RATE_PROVIDER]?.models ?? {})) {
+      const rec = ratesFromModelsDev(m?.cost);
+      if (rec) rates[id] = rec;
+    }
+    return { rates, fastMultipliers };
   } finally {
     clearTimeout(timer);
   }
+}
+
+/**
+ * LiteLLM 為主，models.dev 只補「LiteLLM 還沒收錄的模型」。
+ *
+ * 這是那 3.23% 對帳缺口的修正。新模型發布後，LiteLLM 型錄要過幾天才跟上；在那之前
+ * 它的訊息會照算 token、卻算不出金額 —— addPart()（attribute.js）對沒有費率的模型
+ * 「只計 token、不計金額」，於是它那一整份支出從全域總額憑空消失。實測把
+ * `claude-fable-5-1` 從型錄拿掉，$83.08 被靜默漏掉，對帳偏差 3.28%。
+ *
+ * ccusage 不會有這個問題：Claude Code 自己就把 costUSD 寫進記錄檔，它預設的 auto
+ * 模式直接採用，所以缺口全部落在我們這一側 —— 這也是為什麼症狀只表現成「對帳偏差」。
+ *
+ * 方向是刻意的：LiteLLM 有的就以 LiteLLM 為準，因為只有它把 5 分鐘與 1 小時的快取
+ * 寫入費率分開公布 —— config.js 已把「絕對費率以 LiteLLM 為準」定為決策。
+ */
+function withFallbackRates(primary, fallback) {
+  const rates = { ...primary };
+  const filled = [];
+  for (const [model, rec] of Object.entries(fallback ?? {})) {
+    if (rates[model]) continue;
+    rates[model] = rec;
+    filled.push(model);
+  }
+  return { rates, filled: filled.sort() };
 }
 
 async function readJson(file) {
@@ -165,30 +244,38 @@ async function diskFastMultipliers() {
 }
 
 /**
- * 啟動時解析一次定價：LiteLLM -> 磁碟快取 -> 內建快照。
+ * 啟動時解析一次定價：LiteLLM -> 磁碟快取 -> 內建快照 -> models.dev。
  * 絕不拋錯；全部失敗時 `state.rates` 維持 null，costOf() 回傳 null，
  * UI 會顯示成「—」而不是誤導人的 $0。
+ *
+ * 前三條路徑「每一條」都會再讓 models.dev 補上它沒收錄的模型（withFallbackRates）：
+ * 三者都會漏掉剛發布的模型，而漏掉的代價不是顯示成「—」，是整份總額靜默少報。
+ *
+ * 一個程序只跑一次。使用者在型錄補上新模型「之前」啟動的儀表板，要重開才會拿到
+ * 新費率 —— 這正是那面 3.23% 橫幅會留在畫面上的原因。
  */
 export async function initPricing() {
   resetUnknownFastModels();
   // 與費率抓取彼此獨立：models.dev 掛掉不該害我們拿不到 LiteLLM 的費率，反之亦然。
   // 缺少倍率這件事會透過 unknownFast 浮出來。
-  let fastMultipliers = null;
+  let modelsDev = null;
   try {
-    fastMultipliers = await fetchFastMultipliers();
+    modelsDev = await fetchModelsDev();
   } catch (err) {
     state.error = `models.dev fetch failed: ${err.message}`;
   }
   // 測試時實際遇過：一次逾時的抓取，就讓每則 fast 訊息靜默地變成半價。
   // 加價倍率的變動速度遠比我們抓型錄的頻率慢，所以「最後一份可用的副本」
   // 遠比「沒有」要好得多。
+  let fastMultipliers = modelsDev?.fastMultipliers ?? null;
   fastMultipliers ??= await diskFastMultipliers();
 
   try {
-    const rates = await fetchLiteLLM();
+    const { rates, filled } = withFallbackRates(await fetchLiteLLM(), modelsDev?.rates);
     setState({
       rates,
       fastMultipliers,
+      fallbackModels: filled,
       source: 'litellm',
       fetchedAt: new Date().toISOString(),
       error: state.error,
@@ -209,10 +296,14 @@ export async function initPricing() {
   ]) {
     try {
       const doc = await readJson(file);
+      // 磁碟上的副本一樣會漏掉新模型 —— 打包時的快照更是如此（它是發版當天凍結的），
+      // 所以這條路徑同樣讓 models.dev 補漏。
+      const { rates, filled } = withFallbackRates(doc.rates ?? doc, modelsDev?.rates);
       setState({
-        rates: doc.rates ?? doc,
+        rates,
         // 即時抓到的 models.dev 仍然優先於磁碟上過期的副本。
         fastMultipliers: fastMultipliers ?? doc.fastMultipliers ?? null,
+        fallbackModels: filled,
         source,
         fetchedAt: doc.fetchedAt ?? null,
         error: state.error,
@@ -221,6 +312,19 @@ export async function initPricing() {
     } catch {
       // 試下一個 fallback
     }
+  }
+
+  // 磁碟上兩份都讀不到，但 models.dev 還活著。它至少涵蓋每一個 Claude 模型，
+  // 而這裡的替代選項是「完全沒有費率」—— 那會讓整個儀表板變成一排「—」。
+  if (modelsDev?.rates && Object.keys(modelsDev.rates).length) {
+    setState({
+      rates: modelsDev.rates,
+      fastMultipliers,
+      fallbackModels: Object.keys(modelsDev.rates).sort(),
+      source: 'models.dev',
+      fetchedAt: new Date().toISOString(),
+      error: state.error,
+    });
   }
   return state;
 }
@@ -238,6 +342,9 @@ export function pricingStatus() {
     modelCount: state.rates ? Object.keys(state.rates).length : 0,
     fastModelCount: state.fastMultipliers ? Object.keys(state.fastMultipliers).length : 0,
     unknownFastModels: unknownFastModels(),
+    // 主來源沒收錄、由 models.dev 補上費率的模型。非空不是錯誤，但它是一個訊號：
+    // 這些模型的金額走的是備用型錄。
+    fallbackModels: state.fallbackModels ?? [],
     error: state.error,
   };
 }
@@ -368,6 +475,7 @@ export function loadSnapshotSync() {
   setState({
     rates: doc.rates ?? doc,
     fastMultipliers: doc.fastMultipliers ?? null,
+    fallbackModels: [],
     source: 'snapshot',
     fetchedAt: doc.fetchedAt ?? null,
     error: null,
@@ -375,4 +483,4 @@ export function loadSnapshotSync() {
   return state;
 }
 
-export const _internal = { pickRates, RATE_FIELDS, path, fetchFastMultipliers, FAST_SUFFIX };
+export const _internal = { pickRates, RATE_FIELDS, path, fetchModelsDev, ratesFromModelsDev, withFallbackRates, FAST_SUFFIX };

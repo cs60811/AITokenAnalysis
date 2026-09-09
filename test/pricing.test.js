@@ -289,18 +289,18 @@ describe('pricingStatus', () => {
   });
 });
 
+const stubFetch = (byUrl) =>
+  vi.stubGlobal('fetch', async (url) => {
+    const hit = byUrl[String(url)];
+    if (!hit) throw new Error('unexpected url ' + url);
+    if (hit instanceof Error) throw hit;
+    return { ok: true, json: async () => hit };
+  });
+
+const LITELLM = 'https://litellm.test/prices.json';
+const MODELSDEV = 'https://models.test/api.json';
+
 describe('initPricing', () => {
-  const stubFetch = (byUrl) =>
-    vi.stubGlobal('fetch', async (url) => {
-      const hit = byUrl[String(url)];
-      if (!hit) throw new Error('unexpected url ' + url);
-      if (hit instanceof Error) throw hit;
-      return { ok: true, json: async () => hit };
-    });
-
-  const LITELLM = 'https://litellm.test/prices.json';
-  const MODELSDEV = 'https://models.test/api.json';
-
   it('prefers live LiteLLM rates and writes them to the on-disk cache', async () => {
     stubFetch({
       [LITELLM]: { 'live-model': { input_cost_per_token: 0.5, output_cost_per_token: 1 } },
@@ -412,6 +412,83 @@ describe('initPricing', () => {
     await initPricing();
     expect(fastMultiplierFor('noFast')).toBeNull();
     expect(fastMultiplierFor('noBase')).toBeNull();
+  });
+});
+
+describe('models.dev rate fallback', () => {
+  // 剛發布的模型會比 LiteLLM 型錄先到。在補上這條 fallback 之前，這種模型會照算
+  // token、卻算不出金額，於是它整份支出從總額裡憑空消失 —— 實測 `claude-fable-5-1`
+  // 就這樣靜默漏掉 $83.08，只表現成 3.28% 的對帳偏差。
+  const anthropicDoc = (models) => ({ anthropic: { models } });
+
+  it('prices a model LiteLLM has not catalogued yet, converting per-million to per-token', async () => {
+    stubFetch({
+      [LITELLM]: { known: { input_cost_per_token: 1 } },
+      [MODELSDEV]: anthropicDoc({
+        newcomer: { cost: { input: 10, output: 50, cache_read: 0.25, cache_write: 12.5 } },
+      }),
+    });
+    await initPricing();
+    expect(ratesFor('newcomer')).toEqual({
+      input_cost_per_token: 0.00001,
+      output_cost_per_token: 0.00005,
+      cache_creation_input_token_cost: 0.0000125,
+      // models.dev 沒有 1 小時欄位；它是由 input 的 2 倍推導出來的。
+      cache_creation_input_token_cost_above_1hr: 0.00002,
+      cache_read_input_token_cost: 2.5e-7,
+    });
+    expect(pricingStatus().fallbackModels).toEqual(['newcomer']);
+  });
+
+  it('never overrides a rate LiteLLM already publishes', async () => {
+    stubFetch({
+      [LITELLM]: { m: { input_cost_per_token: 1, output_cost_per_token: 2 } },
+      [MODELSDEV]: anthropicDoc({ m: { cost: { input: 999, output: 999 } } }),
+    });
+    await initPricing();
+    expect(ratesFor('m')).toEqual({ input_cost_per_token: 1, output_cost_per_token: 2 });
+    expect(pricingStatus().fallbackModels).toEqual([]);
+  });
+
+  // 同一個 model id 會出現在幾十家轉售商底下，牌價各不相同（實測 claude-opus-4-8
+  // 在 unorouter 是 0.425/2.125）。絕對費率只能取 anthropic 那一份。
+  it('takes rates only from the anthropic provider, ignoring resellers', async () => {
+    stubFetch({
+      [LITELLM]: {},
+      [MODELSDEV]: {
+        reseller: { models: { cheap: { cost: { input: 1, output: 1 } } } },
+        anthropic: { models: { real: { cost: { input: 5, output: 25 } } } },
+      },
+    });
+    await initPricing();
+    expect(hasRates('cheap')).toBe(false);
+    expect(ratesFor('real').input_cost_per_token).toBe(0.000005);
+  });
+
+  it('skips models.dev entries with no published input or output price', async () => {
+    stubFetch({
+      [LITELLM]: {},
+      [MODELSDEV]: anthropicDoc({
+        outputOnly: { cost: { output: 5 } },
+        inputOnly: { cost: { input: 5 } },
+        noCost: {},
+      }),
+    });
+    await initPricing();
+    expect(pricingStatus().fallbackModels).toEqual([]);
+  });
+
+  it('fills gaps in the bundled snapshot too, so a blocked LiteLLM cannot zero out a new model', async () => {
+    stubFetch({
+      [LITELLM]: new Error('GitHub blocked'),
+      [MODELSDEV]: anthropicDoc({ newcomer: { cost: { input: 10, output: 50 } } }),
+    });
+    const state = await initPricing();
+    expect(state.source).toBe('snapshot');
+    // 快照自己的模型全都留著；models.dev 只補它漏掉的那一個。
+    expect(ratesFor('test-opus')).toEqual(RATES.rates['test-opus']);
+    expect(ratesFor('newcomer').input_cost_per_token).toBe(0.00001);
+    expect(pricingStatus().fallbackModels).toEqual(['newcomer']);
   });
 });
 
