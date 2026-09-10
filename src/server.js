@@ -160,6 +160,9 @@ app.get(
     const analysis = getAnalysis();
     const ours = ourClaudeTotal();
     const un = unattributedTotal();
+    // 查不到費率的模型：token 有算、金額沒算，所以那筆錢從畫面上每個總額裡消失了。
+    // 這是對帳偏差最常見的成因，而光給一個百分比等於要使用者自己猜是哪個模型。
+    const unpricedModels = [...new Set(analysis.sessions.flatMap((s) => s.unpricedModels ?? []))].sort();
 
     let reconcile = null;
     let ccusageErr = null;
@@ -183,7 +186,7 @@ app.get(
     }
 
     return {
-      pricing: pricingStatus(),
+      pricing: { ...pricingStatus(), unpricedModels },
       ccusage: { version, cliPath: ccusage.cliLocation(), error: ccusageErr },
       analysis: {
         sessions: analysis.sessions.length,

@@ -80,11 +80,16 @@ export const LITELLM_PRICES_URL =
 export const LITELLM_TIMEOUT_MS = 5000;
 
 /**
- * 第二份型錄，只為了查 fast 模式的加價倍率。
+ * 第二份型錄，用途有兩個：查 fast 模式的加價倍率，以及替 LiteLLM 補漏。
  *
- * LiteLLM 沒有速度這個維度，所以它根本無法為一則 `/fast` 訊息定價。
- * models.dev 把它放在 `experimental.modes.fast` —— 也正是 ccusage 讀的同一份來源 ——
- * 我們只取倍率，絕對費率與 5m/1h 快取寫入的拆分仍以 LiteLLM 為準。
+ * 倍率：LiteLLM 沒有速度這個維度，所以它根本無法為一則 `/fast` 訊息定價。
+ * models.dev 把它放在 `experimental.modes.fast` —— 也正是 ccusage 讀的同一份來源。
+ *
+ * 補漏：剛發布的模型會比 LiteLLM 型錄先到，而沒有費率的模型會照算 token、卻算不出
+ * 金額，於是它整份支出從總額裡消失（實測 claude-fable-5-1 漏掉 $83.08＝3.28%）。
+ * 因此 LiteLLM 沒收錄的模型改由 models.dev 的 anthropic 費率補上 —— 只補、不覆蓋：
+ * LiteLLM 有的仍以 LiteLLM 為準，因為只有它把 5m/1h 快取寫入費率分開公布。
+ * 詳見 pricing.js 的 withFallbackRates。
  */
 export const MODELSDEV_PRICES_URL = 'https://models.dev/api.json';
 

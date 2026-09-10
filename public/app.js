@@ -1069,6 +1069,16 @@ function drawHealth() {
     cls = 'warn';
     msgs.push(`與 ccusage 對帳誤差 ${h.reconcile.pct.toFixed(2)}%，超過 ${h.reconcile.tolerancePct}% 容差。`);
   }
+  // 對帳偏差最常見的成因就在這裡。查不到費率的模型會照算 token、不計金額，
+  // 那筆錢就從畫面上每個總額裡消失了 —— 只給一個百分比，等於要使用者自己猜是誰。
+  const unpriced = h.pricing?.unpricedModels ?? [];
+  if (unpriced.length) {
+    cls = 'error';
+    msgs.push(
+      `有 ${num(unpriced.length)} 個模型查不到費率（<code>${escapeHtml(unpriced.join('、'))}</code>），` +
+      '它們的 token 有計入、金額沒有，所以總成本被低估了。',
+    );
+  }
   // 讀不到的記錄檔裡的成本，不會出現在這個頁面的任何數字上。
   // 這裡若保持沉默，看起來就跟「你花得比較少」一模一樣。
   const unread = h.analysis?.readErrors ?? [];

@@ -121,8 +121,23 @@ LiteLLM 沒有 speed 這個維度、也沒有 `claude-opus-5-fast` 條目，因�
 
 加價倍率改從 [models.dev](https://models.dev) 的 `experimental.modes.fast` 取得
 （ccusage 讀的也是這份，其識別條件 `provider.body.speed === "fast"` 正是記錄檔裡那個欄位），
-**只取比值**：絕對費率與 5m/1h 快取寫入切分仍以 LiteLLM 為準，因為 models.dev 沒有 1h 這個概念。
+**倍率只取比值**：5m/1h 快取寫入切分仍以 LiteLLM 為準，因為 models.dev 沒有 1h 這個概念。
 實測 opus-4-8 與 opus-5 的 fast 在 input／output／快取讀／快取寫四項都是精確 2.00 倍。
+
+### 新模型還沒進型錄
+
+LiteLLM 型錄要過幾天才會收錄剛發布的模型。在那之前，該模型的訊息會照算 token、卻算不出
+金額——它整份支出從總額裡消失，只表現成一個對帳偏差。實測 `claude-fable-5-1` 就這樣靜默
+漏掉 **$83.08（3.28%）**。
+
+因此 **LiteLLM 沒收錄的模型改由 models.dev 的 `anthropic` 費率補上**（只補、不覆蓋）。
+費率只認 `anthropic` 這一家：同一個 model id 在幾十家轉售商底下牌價各不相同
+（`claude-opus-4-8` 在某些轉售商是 0.425/2.125）。models.dev 沒有 1 小時快取寫入欄位，
+該費率由 input 的 2 倍推導——兩份型錄都收錄的 14 個 Claude 模型，LiteLLM 的
+`above_1hr ÷ input` 全部恰為 2.000。
+
+`npm run verify` 第 7 項會擋住這類缺口：「語料裡每個模型都查得到費率」。查不到費率的模型
+也會直接顯示在儀表板橫幅上並指名，而不是只給一個看不出兇手的百分比。
 
 內部視為虛擬模型 `<模型>-fast`（與 ccusage 報的名稱一致），所以：
 

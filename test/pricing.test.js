@@ -289,18 +289,18 @@ describe('pricingStatus', () => {
   });
 });
 
+const stubFetch = (byUrl) =>
+  vi.stubGlobal('fetch', async (url) => {
+    const hit = byUrl[String(url)];
+    if (!hit) throw new Error('unexpected url ' + url);
+    if (hit instanceof Error) throw hit;
+    return { ok: true, json: async () => hit };
+  });
+
+const LITELLM = 'https://litellm.test/prices.json';
+const MODELSDEV = 'https://models.test/api.json';
+
 describe('initPricing', () => {
-  const stubFetch = (byUrl) =>
-    vi.stubGlobal('fetch', async (url) => {
-      const hit = byUrl[String(url)];
-      if (!hit) throw new Error('unexpected url ' + url);
-      if (hit instanceof Error) throw hit;
-      return { ok: true, json: async () => hit };
-    });
-
-  const LITELLM = 'https://litellm.test/prices.json';
-  const MODELSDEV = 'https://models.test/api.json';
-
   it('prefers live LiteLLM rates and writes them to the on-disk cache', async () => {
     stubFetch({
       [LITELLM]: { 'live-model': { input_cost_per_token: 0.5, output_cost_per_token: 1 } },
@@ -412,6 +412,180 @@ describe('initPricing', () => {
     await initPricing();
     expect(fastMultiplierFor('noFast')).toBeNull();
     expect(fastMultiplierFor('noBase')).toBeNull();
+  });
+});
+
+describe('models.dev rate fallback', () => {
+  // 剛發布的模型會比 LiteLLM 型錄先到。在補上這條 fallback 之前，這種模型會照算
+  // token、卻算不出金額，於是它整份支出從總額裡憑空消失 —— 實測 `claude-fable-5-1`
+  // 就這樣靜默漏掉 $83.08，只表現成 3.28% 的對帳偏差。
+  const anthropicDoc = (models) => ({ anthropic: { models } });
+
+  it('prices a model LiteLLM has not catalogued yet, converting per-million to per-token', async () => {
+    stubFetch({
+      [LITELLM]: { known: { input_cost_per_token: 1 } },
+      [MODELSDEV]: anthropicDoc({
+        newcomer: { cost: { input: 10, output: 50, cache_read: 0.25, cache_write: 12.5 } },
+      }),
+    });
+    await initPricing();
+    expect(ratesFor('newcomer')).toEqual({
+      input_cost_per_token: 0.00001,
+      output_cost_per_token: 0.00005,
+      cache_creation_input_token_cost: 0.0000125,
+      // models.dev 沒有 1 小時欄位；它是由 input 的 2 倍推導出來的。
+      cache_creation_input_token_cost_above_1hr: 0.00002,
+      cache_read_input_token_cost: 2.5e-7,
+    });
+    expect(pricingStatus().fallbackModels).toEqual(['newcomer']);
+  });
+
+  it('never overrides a rate LiteLLM already publishes', async () => {
+    stubFetch({
+      [LITELLM]: { m: { input_cost_per_token: 1, output_cost_per_token: 2 } },
+      [MODELSDEV]: anthropicDoc({ m: { cost: { input: 999, output: 999 } } }),
+    });
+    await initPricing();
+    expect(ratesFor('m')).toEqual({ input_cost_per_token: 1, output_cost_per_token: 2 });
+    expect(pricingStatus().fallbackModels).toEqual([]);
+  });
+
+  // 同一個 model id 會出現在幾十家轉售商底下，牌價各不相同（實測 claude-opus-4-8
+  // 在 unorouter 是 0.425/2.125）。絕對費率只能取 anthropic 那一份。
+  it('takes rates only from the anthropic provider, ignoring resellers', async () => {
+    stubFetch({
+      [LITELLM]: {},
+      [MODELSDEV]: {
+        reseller: { models: { cheap: { cost: { input: 1, output: 1, cache_read: 0.1 } } } },
+        anthropic: { models: { real: { cost: { input: 5, output: 25, cache_read: 0.5 } } } },
+      },
+    });
+    await initPricing();
+    expect(hasRates('cheap')).toBe(false);
+    expect(ratesFor('real').input_cost_per_token).toBe(0.000005);
+  });
+
+  it('skips models.dev entries with no published input or output price', async () => {
+    stubFetch({
+      [LITELLM]: {},
+      [MODELSDEV]: anthropicDoc({
+        outputOnly: { cost: { output: 5 } },
+        inputOnly: { cost: { input: 5 } },
+        noCost: {},
+      }),
+    });
+    await initPricing();
+    expect(pricingStatus().fallbackModels).toEqual([]);
+  });
+
+  it('derives the 5m cache-write rate when models.dev omits it, so it is never billed at $0', async () => {
+    stubFetch({
+      [LITELLM]: {},
+      [MODELSDEV]: anthropicDoc({ nowrite: { cost: { input: 10, output: 50, cache_read: 1 } } }),
+    });
+    await initPricing();
+    const r = ratesFor('nowrite');
+    // 5 分鐘＝input 的 1.25 倍、1 小時＝2 倍，兩者都必須有值。
+    expect(r.cache_creation_input_token_cost).toBe(0.0000125);
+    expect(r.cache_creation_input_token_cost_above_1hr).toBe(0.00002);
+    expect(cacheWrite1hRateOf(r)).toBe(0.00002);
+  });
+
+  // 快取讀取的倍率並不一致（opus-5 是 0.1 倍、fable-5-1 只有 0.025 倍），推不出來，
+  // 而它通常是 token 量最大的一類 —— 當 $0 會是最大的一個謊，寧可讓閘門擋下來。
+  it('refuses to price a model whose cache-read rate is unpublished', async () => {
+    stubFetch({
+      [LITELLM]: {},
+      [MODELSDEV]: anthropicDoc({ noread: { cost: { input: 10, output: 50, cache_write: 12.5 } } }),
+    });
+    await initPricing();
+    expect(hasRates('noread')).toBe(false);
+    expect(pricingStatus().fallbackModels).toEqual([]);
+  });
+
+  it('records which rates came from the fallback so a restart cannot launder them', async () => {
+    stubFetch({
+      [LITELLM]: { known: { input_cost_per_token: 1 } },
+      [MODELSDEV]: anthropicDoc({ newcomer: { cost: { input: 10, output: 50, cache_read: 1 } } }),
+    });
+    await initPricing();
+    // 磁碟快取要帶著這份名單，否則下一次走 cache 路徑就會把「這是估值」洗掉。
+    expect(JSON.parse(fs.readFileSync(CACHE, 'utf8')).fallbackModels).toEqual(['newcomer']);
+  });
+
+  // LiteLLM 也會出現只有 input/output 的殘缺條目（本 repo 的 prices.json 裡
+  // gemini-2.5-flash、gpt-5.5 就是）。整筆跳過會讓缺掉的欄位以 $0 計費。
+  it('patches missing rate fields on a partial LiteLLM entry without overriding the ones it has', async () => {
+    stubFetch({
+      [LITELLM]: { m: { input_cost_per_token: 0.000009, output_cost_per_token: 0.00009 } },
+      [MODELSDEV]: anthropicDoc({
+        m: { cost: { input: 10, output: 50, cache_read: 1, cache_write: 12.5 } },
+      }),
+    });
+    await initPricing();
+    const r = ratesFor('m');
+    // LiteLLM 自己有的兩項原封不動。
+    expect(r.input_cost_per_token).toBe(0.000009);
+    expect(r.output_cost_per_token).toBe(0.00009);
+    // 缺的三項由備用型錄補上，而不是留空以 $0 計費。
+    expect(r.cache_creation_input_token_cost).toBe(0.0000125);
+    expect(r.cache_creation_input_token_cost_above_1hr).toBe(0.00002);
+    expect(r.cache_read_input_token_cost).toBe(0.000001);
+    expect(pricingStatus().fallbackModels).toEqual(['m']);
+  });
+
+  // 一次 models.dev 逾時若把磁碟上的備用費率洗掉，那 3.23% 的缺口就整個回來了。
+  it('reuses the last good on-disk fallback rate when models.dev is unreachable', async () => {
+    fs.writeFileSync(
+      CACHE,
+      JSON.stringify({
+        rates: { newcomer: { input_cost_per_token: 0.00001, output_cost_per_token: 0.00005 } },
+        fallbackModels: ['newcomer'],
+      }),
+    );
+    // LiteLLM 還活著、但仍未收錄 newcomer；models.dev 這次連不上。
+    stubFetch({ [LITELLM]: { other: { input_cost_per_token: 1 } }, [MODELSDEV]: new Error('down') });
+    const state = await initPricing();
+    expect(state.source).toBe('litellm');
+    expect(ratesFor('newcomer').input_cost_per_token).toBe(0.00001);
+    // 而且要繼續留在磁碟上，不能被這一輪的寫入抹掉。
+    expect(JSON.parse(fs.readFileSync(CACHE, 'utf8')).fallbackModels).toEqual(['newcomer']);
+  });
+
+  // 兩項防線的交互作用：磁碟上存的是「已合併」的記錄，下一輪 models.dev 又掛掉時，
+  // 它會被當成備用型錄再對殘缺的 LiteLLM 條目合併一次。必須是幂等的，
+  // 否則反覆重啟會讓費率愈補愈歪。
+  it('re-merges an on-disk merged record against a partial LiteLLM entry idempotently', async () => {
+    const merged = {
+      input_cost_per_token: 0.000009,
+      output_cost_per_token: 0.00009,
+      cache_creation_input_token_cost: 0.0000125,
+      cache_creation_input_token_cost_above_1hr: 0.00002,
+      cache_read_input_token_cost: 0.000001,
+    };
+    fs.writeFileSync(CACHE, JSON.stringify({ rates: { m: merged }, fallbackModels: ['m'] }));
+    stubFetch({
+      // LiteLLM 仍然只有 input/output 這兩項。
+      [LITELLM]: { m: { input_cost_per_token: 0.000009, output_cost_per_token: 0.00009 } },
+      [MODELSDEV]: new Error('down'),
+    });
+    await initPricing();
+    expect(ratesFor('m')).toEqual(merged);
+    expect(pricingStatus().fallbackModels).toEqual(['m']);
+    expect(JSON.parse(fs.readFileSync(CACHE, 'utf8')).rates.m).toEqual(merged);
+  });
+
+  it('fills gaps in the bundled snapshot too, so a blocked LiteLLM cannot zero out a new model', async () => {
+    stubFetch({
+      [LITELLM]: new Error('GitHub blocked'),
+      [MODELSDEV]: anthropicDoc({ newcomer: { cost: { input: 10, output: 50, cache_read: 1 } } }),
+    });
+    const state = await initPricing();
+    expect(state.source).toBe('snapshot');
+    // 快照自己的模型全都留著；models.dev 只補它漏掉的那一個。
+    expect(ratesFor('test-opus')).toEqual(RATES.rates['test-opus']);
+    expect(ratesFor('newcomer').input_cost_per_token).toBe(0.00001);
+    expect(pricingStatus().fallbackModels).toEqual(['newcomer']);
   });
 });
 
