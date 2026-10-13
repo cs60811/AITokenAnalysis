@@ -18,6 +18,7 @@ vi.mock('../src/config.js', () => ({
   MODELSDEV_PRICES_URL: 'https://models.test/api.json',
   LITELLM_TIMEOUT_MS: 5000,
   PRICES_STALE_DAYS: 30,
+  PRICES_RETRY_MS: 3_600_000,
 }));
 
 const {
@@ -31,6 +32,7 @@ const {
   loadSnapshotSync,
   pricingStatus,
   ratesFor,
+  refreshPricingIfStale,
   resetUnknownFastModels,
   tokensOf,
   unknownFastModels,
@@ -273,8 +275,26 @@ describe('pricingStatus', () => {
     expect(s.source).toBe('snapshot');
     expect(s.modelCount).toBe(Object.keys(RATES.rates).length);
     expect(s.fastModelCount).toBe(1);
-    expect(s.stale).toBe(true); // 這份測試資料的日期是 2026-01-01
-    expect(s.ageDays).toBeGreaterThan(30);
+    expect(s.ageDays).toBeGreaterThan(30); // 這份測試資料的日期是 2026-01-01
+    // 舊歸舊，沒抓失敗過就不提醒：背景會自己重抓。
+    expect(s.stale).toBe(false);
+  });
+
+  it('flags staleness only once fetching LiteLLM has failed on an expired snapshot', async () => {
+    vi.stubGlobal('fetch', async () => {
+      throw new Error('offline');
+    });
+    await initPricing(); // 退回 2026-01-01 的快照
+    expect(pricingStatus().stale).toBe(true);
+  });
+
+  it('does not flag a snapshot that is still within PRICES_STALE_DAYS, even after a failed fetch', async () => {
+    fs.writeFileSync(CACHE, JSON.stringify({ fetchedAt: new Date().toISOString(), rates: RATES.rates }));
+    vi.stubGlobal('fetch', async () => {
+      throw new Error('offline');
+    });
+    await initPricing();
+    expect(pricingStatus()).toMatchObject({ source: 'cache', stale: false });
   });
 
   it('surfaces the models seen billing fast with no published premium', async () => {
@@ -586,6 +606,90 @@ describe('models.dev rate fallback', () => {
     expect(ratesFor('test-opus')).toEqual(RATES.rates['test-opus']);
     expect(ratesFor('newcomer').input_cost_per_token).toBe(0.00001);
     expect(pricingStatus().fallbackModels).toEqual(['newcomer']);
+  });
+});
+
+describe('refreshPricingIfStale', () => {
+  const HOUR = 3_600_000;
+  const DAY = 24 * HOUR;
+  // 上一次嘗試的時間是模組層級的狀態；每個測試把時鐘往前推過重試間隔，彼此才不會擋到。
+  let now = Date.parse('2026-10-13T00:00:00.000Z');
+  beforeEach(() => {
+    now += 2 * HOUR;
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(now);
+  });
+  afterEach(() => vi.useRealTimers());
+
+  const liteWith = (input) => ({
+    [LITELLM]: { 'test-opus': { input_cost_per_token: input, output_cost_per_token: 1 } },
+    [MODELSDEV]: {},
+  });
+
+  it('does nothing while the snapshot is younger than PRICES_STALE_DAYS', async () => {
+    stubFetch(liteWith(0.5));
+    await initPricing();
+    vi.stubGlobal('fetch', async () => {
+      throw new Error('should not fetch');
+    });
+    expect(refreshPricingIfStale()).toBeNull();
+  });
+
+  it('refetches a stale snapshot and reports that the rates changed', async () => {
+    // 快照（fixture）的 fetchedAt 是 2026-01-01，早就過期。
+    stubFetch(liteWith(0.5));
+    expect(await refreshPricingIfStale()).toBe(true);
+    expect(ratesFor('test-opus').input_cost_per_token).toBe(0.5);
+    expect(pricingStatus()).toMatchObject({ source: 'litellm', stale: false });
+  });
+
+  it('reports no change when the refetched rates are identical', async () => {
+    stubFetch(liteWith(0.5));
+    expect(await refreshPricingIfStale()).toBe(true);
+    vi.setSystemTime((now += 31 * DAY)); // 超過上面 mock 的 PRICES_STALE_DAYS（30）
+    expect(await refreshPricingIfStale()).toBe(false);
+  });
+
+  it('keeps the current rates when LiteLLM is down, and waits PRICES_RETRY_MS before retrying', async () => {
+    vi.stubGlobal('fetch', async () => {
+      throw new Error('offline');
+    });
+    expect(await refreshPricingIfStale()).toBe(false);
+    expect(ratesFor('test-opus')).toEqual(RATES.rates['test-opus']);
+    expect(pricingStatus().error).toMatch(/LiteLLM refresh failed/);
+    expect(pricingStatus().stale).toBe(true);
+
+    expect(refreshPricingIfStale()).toBeNull();
+    vi.setSystemTime((now += HOUR + 1));
+    expect(refreshPricingIfStale()).not.toBeNull();
+  });
+
+  it('does not flag staleness while a retry is still in flight', async () => {
+    vi.stubGlobal('fetch', async () => {
+      throw new Error('offline');
+    });
+    await initPricing(); // 啟動時抓失敗 → stale
+    expect(pricingStatus().stale).toBe(true);
+
+    let open;
+    const gate = new Promise((resolve) => (open = resolve));
+    vi.stubGlobal('fetch', async () => {
+      await gate;
+      return { ok: false, status: 503, json: async () => ({}) };
+    });
+    const pending = refreshPricingIfStale();
+    // 過期後第一次載入頁面：背景重抓還沒做完，這時提醒是假警報。
+    expect(pricingStatus().stale).toBe(false);
+    open();
+    await pending;
+    expect(pricingStatus().stale).toBe(true); // 重抓也失敗了，這才是真的停在舊費率
+  });
+
+  it('shares one refetch between concurrent callers', async () => {
+    stubFetch(liteWith(0.5));
+    const a = refreshPricingIfStale();
+    expect(refreshPricingIfStale()).toBe(a);
+    await a;
   });
 });
 

@@ -7,6 +7,7 @@ import {
   LITELLM_TIMEOUT_MS,
   MODELSDEV_PRICES_URL,
   PRICES_CACHE_FILE,
+  PRICES_RETRY_MS,
   PRICES_SNAPSHOT_FILE,
   PRICES_STALE_DAYS,
 } from './config.js';
@@ -293,6 +294,49 @@ async function diskFastMultipliers() {
 }
 
 /**
+ * models.dev 那一側：加價倍率與備用費率，抓不到就用磁碟上最後一份。
+ *
+ * 與 LiteLLM 的抓取彼此獨立：models.dev 掛掉不該害我們拿不到 LiteLLM 的費率，
+ * 反之亦然。缺少倍率這件事會透過 unknownFast 浮出來。
+ */
+async function modelsDevOrDisk() {
+  let modelsDev = null;
+  let error = null;
+  try {
+    modelsDev = await fetchModelsDev();
+  } catch (err) {
+    error = `models.dev fetch failed: ${err.message}`;
+  }
+  // 測試時實際遇過：一次逾時的抓取，就讓每則 fast 訊息靜默地變成半價。
+  // 加價倍率的變動速度遠比我們抓型錄的頻率慢，所以「最後一份可用的副本」
+  // 遠比「沒有」要好得多。
+  const fastMultipliers = modelsDev?.fastMultipliers ?? (await diskFastMultipliers());
+  // 同理：即時抓到的優先，抓不到就用磁碟上最後一份，絕不讓它變成「沒有」。
+  const fallbackRates = modelsDev?.rates ?? (await diskFallbackRates());
+  return { fastMultipliers, fallbackRates, error };
+}
+
+/** 採用一份剛抓到的 LiteLLM 型錄（補上 models.dev 的漏），並寫進磁碟快取。 */
+async function adoptLiteLLM(liteRates, { fastMultipliers, fallbackRates, error }) {
+  const { rates, filled } = withFallbackRates(liteRates, fallbackRates);
+  setState({
+    rates,
+    fastMultipliers,
+    fallbackModels: filled,
+    source: 'litellm',
+    fetchedAt: new Date().toISOString(),
+    error,
+  });
+  await fsp.mkdir(CACHE_DIR, { recursive: true });
+  await fsp.writeFile(
+    PRICES_CACHE_FILE,
+    // fallbackModels 也要一起寫：少了它，下一次改走 cache 路徑時就會把「這幾筆
+    // 是備用型錄推導出來的估值」這件事洗掉，估值照用、來源卻報成 cache。
+    JSON.stringify({ fetchedAt: state.fetchedAt, rates, fastMultipliers, fallbackModels: filled }, null, 2),
+  );
+}
+
+/**
  * 啟動時解析一次定價：LiteLLM -> 磁碟快取 -> 內建快照 -> models.dev。
  * 絕不拋錯；全部失敗時 `state.rates` 維持 null，costOf() 回傳 null，
  * UI 會顯示成「—」而不是誤導人的 $0。
@@ -300,45 +344,18 @@ async function diskFastMultipliers() {
  * 前三條路徑「每一條」都會再讓 models.dev 補上它沒收錄的模型（withFallbackRates）：
  * 三者都會漏掉剛發布的模型，而漏掉的代價不是顯示成「—」，是整份總額靜默少報。
  *
- * 一個程序只跑一次。使用者在型錄補上新模型「之前」啟動的儀表板，要重開才會拿到
- * 新費率 —— 這正是那面 3.23% 橫幅會留在畫面上的原因。
+ * 一個程序只跑一次；之後由 refreshPricingIfStale() 在快照過期時於背景重抓。
  */
 export async function initPricing() {
   resetUnknownFastModels();
-  // 與費率抓取彼此獨立：models.dev 掛掉不該害我們拿不到 LiteLLM 的費率，反之亦然。
-  // 缺少倍率這件事會透過 unknownFast 浮出來。
-  let modelsDev = null;
-  try {
-    modelsDev = await fetchModelsDev();
-  } catch (err) {
-    state.error = `models.dev fetch failed: ${err.message}`;
-  }
-  // 測試時實際遇過：一次逾時的抓取，就讓每則 fast 訊息靜默地變成半價。
-  // 加價倍率的變動速度遠比我們抓型錄的頻率慢，所以「最後一份可用的副本」
-  // 遠比「沒有」要好得多。
-  let fastMultipliers = modelsDev?.fastMultipliers ?? null;
-  fastMultipliers ??= await diskFastMultipliers();
-  // 同理：即時抓到的優先，抓不到就用磁碟上最後一份，絕不讓它變成「沒有」。
-  let fallbackRates = modelsDev?.rates ?? null;
-  fallbackRates ??= await diskFallbackRates();
+  const { fastMultipliers, fallbackRates, error } = await modelsDevOrDisk();
+  state.error = error;
 
   try {
-    const { rates, filled } = withFallbackRates(await fetchLiteLLM(), fallbackRates);
-    setState({
-      rates,
-      fastMultipliers,
-      fallbackModels: filled,
-      source: 'litellm',
-      fetchedAt: new Date().toISOString(),
-      error: state.error,
-    });
-    await fsp.mkdir(CACHE_DIR, { recursive: true });
-    await fsp.writeFile(
-      PRICES_CACHE_FILE,
-      // fallbackModels 也要一起寫：少了它，下一次改走 cache 路徑時就會把「這幾筆
-      // 是備用型錄推導出來的估值」這件事洗掉，估值照用、來源卻報成 cache。
-      JSON.stringify({ fetchedAt: state.fetchedAt, rates, fastMultipliers, fallbackModels: filled }, null, 2),
-    );
+    liteLLMFailed = true;
+    const lite = await fetchLiteLLM();
+    liteLLMFailed = false;
+    await adoptLiteLLM(lite, { fastMultipliers, fallbackRates, error });
     return state;
   } catch (err) {
     state.error = `LiteLLM fetch failed: ${err.message}`;
@@ -386,16 +403,75 @@ export async function initPricing() {
   return state;
 }
 
+const ageDaysOf = (fetchedAt) => (fetchedAt != null ? (Date.now() - Date.parse(fetchedAt)) / 86_400_000 : null);
+
+let refreshing = null;
+let lastRefreshAttempt = 0;
+/** 最近一次抓 LiteLLM（啟動或背景重抓）是否失敗；決定 UI 要不要提醒費率過期。 */
+let liteLLMFailed = false;
+
+/**
+ * 快照超過 PRICES_STALE_DAYS 就在背景重抓 LiteLLM／models.dev，不阻塞呼叫端。
+ *
+ * 以前費率只在啟動時抓一次，而 ccusage 每次執行都即時抓：LiteLLM 在週間改了
+ * `claude-sonnet-5-5` 的 cache read 費率後，開了 7 天的桌面版就跟 ccusage 對不起來
+ * （偏差 2.31%），而且只會越來越大。費率不會時時在改，所以一天重抓一次就夠。
+ *
+ * - 回傳 null 表示這次不需要（或不能）重抓；否則回傳一個 promise，
+ *   resolve 成「費率是否真的變了」。只有變了，呼叫端才需要丟掉用舊費率算好的分析。
+ * - LiteLLM 抓不到就保留目前的費率，不退回磁碟副本：記憶體裡的那份至少和磁碟一樣新。
+ *   失敗後至少隔 PRICES_RETRY_MS 才再試，免得離線時每個請求都去打網路。
+ * - 並行的呼叫共用同一次重抓。
+ */
+export function refreshPricingIfStale() {
+  if (refreshing) return refreshing;
+  const age = ageDaysOf(state.fetchedAt);
+  if (age != null && age <= PRICES_STALE_DAYS) return null;
+  if (Date.now() - lastRefreshAttempt < PRICES_RETRY_MS) return null;
+  lastRefreshAttempt = Date.now();
+
+  refreshing = (async () => {
+    const md = await modelsDevOrDisk();
+    let lite;
+    try {
+      lite = await fetchLiteLLM();
+      liteLLMFailed = false;
+    } catch (err) {
+      liteLLMFailed = true;
+      state.error = `LiteLLM refresh failed: ${err.message}`;
+      return false;
+    }
+    const before = JSON.stringify([state.rates, state.fastMultipliers]);
+    try {
+      await adoptLiteLLM(lite, md);
+    } catch (err) {
+      // 新費率已經生效，只是沒寫進磁碟；仍要往下比對，否則分析會留在舊費率上。
+      state.error = `pricing cache write failed: ${err.message}`;
+    }
+    const changed = JSON.stringify([state.rates, state.fastMultipliers]) !== before;
+    // 只在費率變了才清：沒變時快取的分析不會重算，清掉的話 unknownFast 就補不回來了。
+    if (changed) resetUnknownFastModels();
+    return changed;
+  })()
+    .catch((err) => {
+      state.error = `pricing refresh failed: ${err.message}`;
+      return false;
+    })
+    .finally(() => {
+      refreshing = null;
+    });
+  return refreshing;
+}
+
 export function pricingStatus() {
-  const ageDays =
-    state.fetchedAt != null
-      ? (Date.now() - Date.parse(state.fetchedAt)) / 86_400_000
-      : null;
+  const ageDays = ageDaysOf(state.fetchedAt);
   return {
     source: state.source,
     fetchedAt: state.fetchedAt,
     ageDays: ageDays == null ? null : Number(ageDays.toFixed(1)),
-    stale: ageDays != null && ageDays > PRICES_STALE_DAYS,
+    // 過期本身不必提醒：背景會自己重抓。只有「重抓失敗、所以費率真的停在舊的」才要讓
+    // 使用者知道。重抓進行中也先不算：過期後第一次載入頁面時重抓還沒做完，那是假警報。
+    stale: ageDays != null && ageDays > PRICES_STALE_DAYS && liteLLMFailed && !refreshing,
     modelCount: state.rates ? Object.keys(state.rates).length : 0,
     fastModelCount: state.fastMultipliers ? Object.keys(state.fastMultipliers).length : 0,
     unknownFastModels: unknownFastModels(),
@@ -537,6 +613,7 @@ export async function writeSnapshot(models) {
 /** 同步載入快照 —— 供跳過 initPricing() 的單元測試使用。 */
 export function loadSnapshotSync() {
   const doc = JSON.parse(fs.readFileSync(PRICES_SNAPSHOT_FILE, 'utf8'));
+  liteLLMFailed = false; // 沒抓過，談不上失敗
   setState({
     rates: doc.rates ?? doc,
     fastMultipliers: doc.fastMultipliers ?? null,
