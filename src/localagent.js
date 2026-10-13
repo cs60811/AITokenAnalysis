@@ -129,6 +129,11 @@ const dayOf = (iso) => (iso ? String(iso).slice(0, 10) : null);
 
 let memo = null; // { fp, runs, scan }
 
+/** 金額是用當時的費率算好存起來的；費率一變（見 server.js）就要丟掉。 */
+export function invalidateLocalAgent() {
+  memo = null;
+}
+
 function fingerprint(files) {
   const parts = [];
   for (const f of files.slice().sort()) {

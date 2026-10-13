@@ -1063,7 +1063,8 @@ function drawHealth() {
     msgs.push('沒有定價資料，成本一律顯示「—」。');
   } else if (h.pricing.stale) {
     cls = 'warn';
-    msgs.push(`定價快照已 ${h.pricing.ageDays} 天未更新。`);
+    // 只有背景重抓失敗時才會是 stale（見 pricing.js 的 pricingStatus）。
+    msgs.push(`無法取得最新費率，目前使用 ${h.pricing.ageDays} 天前的費率。`);
   }
   if (h.reconcile && !h.reconcile.ok) {
     cls = 'warn';

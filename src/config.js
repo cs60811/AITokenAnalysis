@@ -93,8 +93,19 @@ export const LITELLM_TIMEOUT_MS = 5000;
  */
 export const MODELSDEV_PRICES_URL = 'https://models.dev/api.json';
 
-/** 定價快照超過這個天數就在 UI 上提醒。 */
-export const PRICES_STALE_DAYS = 30;
+/**
+ * 定價快照的有效期限：超過就在背景重抓（見 pricing.js 的 refreshPricingIfStale）。
+ * UI 只在「超過這個期限、而且重抓失敗」時才提醒；單純過期不提醒，背景會自己補上。
+ *
+ * 以前是 30 天，而且費率只在啟動時抓一次。但 ccusage 每次執行都即時抓 LiteLLM，
+ * LiteLLM 又會在週間改費率：一個開了 7 天的桌面版還在用 `claude-sonnet-5-5` 舊的
+ * cache read 費率（2e-7，新的是 1e-7），多算 $74.08，對帳偏差 2.31% —— 而 30 天的
+ * 門檻讓畫面上一點提示都沒有。費率不會時時在改，所以一天抓一次就夠了。
+ */
+export const PRICES_STALE_DAYS = 1;
+
+/** 背景重抓失敗後，至少隔這麼久才再試一次，免得離線時每個請求都去打網路。 */
+export const PRICES_RETRY_MS = 60 * 60 * 1000;
 
 /**
  * 全域對帳閘門：我們的 claude 總額 vs `ccusage daily`。

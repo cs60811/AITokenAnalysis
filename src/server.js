@@ -16,9 +16,9 @@ import {
 import * as ccusage from './ccusage.js';
 import { cachedVersion, filterDaily, fullDaily, invalidateCcusage, monthlyFromDaily } from './ccusage-cache.js';
 import { cacheStats, getAnalysis, invalidate } from './cache.js';
-import { localAgentDetail, localAgentSpend } from './localagent.js';
+import { invalidateLocalAgent, localAgentDetail, localAgentSpend } from './localagent.js';
 import { applyUpdate, checkForUpdate, scheduleRestart } from './update.js';
-import { initPricing, pricingStatus } from './pricing.js';
+import { initPricing, pricingStatus, refreshPricingIfStale } from './pricing.js';
 import { CLAUDE_PROJECTS_DIR, HOST, IS_DESKTOP, PORT, RECONCILE_TOLERANCE_PCT, ROOT } from './config.js';
 
 const app = express();
@@ -36,6 +36,20 @@ const asJson = (handler) => async (req, res) => {
     });
   }
 };
+
+/**
+ * 定價快照過期（見 config.js 的 PRICES_STALE_DAYS）就在背景重抓。這一個請求照舊用
+ * 現有的費率回應；費率真的變了，才丟掉用舊費率算好的分析，讓下一個請求重新計算。
+ * ccusage 的快取不用動：它的金額是 ccusage 自己算的。
+ */
+app.use('/api', (req, res, next) => {
+  refreshPricingIfStale()?.then((changed) => {
+    if (!changed) return;
+    invalidate();
+    invalidateLocalAgent();
+  });
+  next();
+});
 
 const range = (req) => ({
   since: req.query.since || undefined,

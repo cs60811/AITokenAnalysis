@@ -101,6 +101,9 @@ npm run coverage # 單元測試 + 覆蓋率報告
 ## 成本計算
 
 執行期抓 [LiteLLM 定價](https://github.com/BerriAI/litellm)，失敗時退回 `.cache/prices.json`，再退回內建 `prices.json`。
+費率快照超過 1 天就在背景重抓（失敗則每小時至多重試一次），費率真的變了才重新計算金額——
+ccusage 每次執行都即時抓 LiteLLM，只在啟動時抓一次的話，LiteLLM 週間改費率就會對不起來
+（實測 `claude-sonnet-5-5` cache read 改價，開了 7 天的桌面版偏差 2.31%）。
 **未知模型顯示 `—`，絕不顯示 $0**（`ccusage -O/--offline` 會對未知模型靜默回傳 $0.00，因此本專案不使用該選項）。
 
 公式（已驗證與 ccusage 逐位相同至小數第 8 位）：
