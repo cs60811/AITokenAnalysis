@@ -164,12 +164,18 @@ function newTurn({ promptId, sessionId, text, timestamp = null, cwd = null, gitB
 /**
  * 依記錄順序，為每個真實的使用者 prompt 建立一個 turn，另外加上 UNATTRIBUTED 這個
  * 收容用的桶。`order` 為呼叫端保留記錄順序；成本迴圈則是透過那個 map 去查歸屬。
+ *
+ * 一個 uuid 只開一個 turn。Claude Code 會把整段歷史（原本的 uuid、原本的時間戳）
+ * 重新附加到「同一個」記錄檔：實測 agentTest 的 f25f3e83 有 25,356 行帶 uuid，
+ * 不重複的只有 10,175 個，同一則 prompt 最多出現 5 份。計費早就以 dedupKey 去重，
+ * 但這裡沒有：每一份都進了 `order`、指向同一個桶，於是語句排行出現重複列，
+ * 逐 turn 加總的金額（趨勢分頁）多算 $1,415.98（26.84%）。
  */
 function mintTurns(session, mainLines) {
   const turns = new Map();
   const order = [];
   for (const line of mainLines) {
-    if (!isRealPrompt(line)) continue;
+    if (!isRealPrompt(line) || turns.has(line.uuid)) continue;
     turns.set(
       line.uuid,
       newTurn({
@@ -192,22 +198,32 @@ function mintTurns(session, mainLines) {
  *
  * 會把走過的整條鏈都記憶起來，連 null 結果也記：走不到的行就維持走不到，不會被重走一次；
  * 而那個 null 正是 buildAgentIndexes 的使用端那些 `??` fallback 所依賴的東西。
+ *
+ * 鏈上有環就當成走不到。沿 logicalParentUuid 走之後，環是真的會出現的：實測 7 個檔案
+ * （多為從上一個 session 接續的檔案）裡，logicalParentUuid 指到的那幾行被重新掛到
+ * 壓縮摘要底下 —— boundary -> stop_hook -> assistant -> summary -> boundary。
+ * 少了這道防線，while 迴圈會一直把同一圈推進 chain，直到陣列長度爆掉。
  */
 function createOwnerResolver(byUuid) {
   const cache = new Map();
   return function ownerPromptOf(uuid) {
     const chain = [];
+    const onChain = new Set();
     let cur = uuid;
     while (cur) {
       if (cache.has(cur)) break;
       const line = byUuid.get(cur);
-      if (!line) {
+      if (!line || onChain.has(cur)) {
         cur = null;
         break;
       }
       chain.push(cur);
+      onChain.add(cur);
       if (isRealPrompt(line)) break;
-      cur = line.parentUuid ?? null;
+      // compact_boundary 的 parentUuid 是 null，壓縮前的上一則記在 logicalParentUuid
+      // （全語料只有這種行帶它）。沿它續走，壓縮後的續跑成本才會歸到壓縮前進行中的
+      // prompt，而不是掉進 UNATTRIBUTED —— 以前是被當成 prompt 的壓縮摘要接走了它。
+      cur = line.parentUuid ?? line.logicalParentUuid ?? null;
     }
     const owner = cur && cache.has(cur) ? cache.get(cur) : cur;
     for (const u of chain) cache.set(u, owner);

@@ -108,6 +108,44 @@ describe('analyzeSession — main transcript attribution', () => {
     expect(turnOf(r, 'p1').ownCost).toBeCloseTo(dollars(3000), 12);
   });
 
+  it('charges post-compaction work to the prompt in progress, not to the compact summary', () => {
+    // compact_boundary 的 parentUuid 是 null，真正的上一則記在 logicalParentUuid。
+    const d = dir();
+    const main = jsonl(path.join(d, 'sid-1.jsonl'), [
+      prompt('p1', 'build it'),
+      asst('a1', 'p1', 1000),
+      { type: 'system', subtype: 'compact_boundary', uuid: 'cb', parentUuid: null, logicalParentUuid: 'a1' },
+      prompt('sum', '<artifact-content-authored-by-others/>\nThe summarized conversation…', {
+        parentUuid: 'cb',
+        isCompactSummary: true,
+      }),
+      asst('a2', 'sum', 300),
+    ]);
+    const r = analyzeSession(session({ main }));
+
+    expect(r.turns.map((t) => t.promptId)).toEqual(['p1']);
+    expect(r.promptCount).toBe(1);
+    expect(turnOf(r, 'p1').ownCost).toBeCloseTo(dollars(1300), 12);
+  });
+
+  it('treats a parent cycle through logicalParentUuid as unreachable instead of looping forever', () => {
+    // 實測 7 個檔案（多為從上一個 session 接續的檔案）：logicalParentUuid 指到的那幾行，
+    // 在新檔案裡被重新掛到摘要底下 —— boundary -> stop_hook -> assistant -> summary -> boundary。
+    const d = dir();
+    const main = jsonl(path.join(d, 'sid-1.jsonl'), [
+      { type: 'system', subtype: 'compact_boundary', uuid: 'cb', parentUuid: null, logicalParentUuid: 'hook' },
+      prompt('sum', 'summary', { parentUuid: 'cb', isCompactSummary: true }),
+      asst('a1', 'sum', 300),
+      { type: 'system', subtype: 'stop_hook_summary', uuid: 'hook', parentUuid: 'a1' },
+      prompt('p1', 'next real prompt', { parentUuid: 'hook' }),
+      asst('a2', 'p1', 1000),
+    ]);
+    const r = analyzeSession(session({ main }));
+
+    expect(turnOf(r, 'p1').ownCost).toBeCloseTo(dollars(1000), 12);
+    expect(turnOf(r, '__unattributed__').ownCost).toBeCloseTo(dollars(300), 12);
+  });
+
   it('sends cost with no reachable prompt to the UNATTRIBUTED bucket', () => {
     const d = dir();
     const main = jsonl(path.join(d, 'sid-1.jsonl'), [asst('a1', 'ghost-parent', 1000)]);
@@ -426,6 +464,22 @@ describe('analyzeSession — dedup via the shared seen set', () => {
 
     expect(a.ownCost).toBeCloseTo(dollars(1000), 12);
     expect(b.ownCost).toBeCloseTo(dollars(500), 12); // 只有它真正新增的那則訊息
+  });
+
+  it('opens one turn per prompt uuid when Claude Code re-appends history to the same file', () => {
+    // 實測 agentTest 的 f25f3e83：同一段歷史（原本的 uuid、原本的時間戳）被重新附加到
+    // 同一個記錄檔，最多 5 份。以前每一份都會開一個 turn，指向同一個桶，
+    // 於是語句排行出現重複列，逐 turn 加總的金額（趨勢分頁）多算 26.84%。
+    const d = dir();
+    const history = [prompt('p1', 'x'), asst('a1', 'p1', 1000), prompt('p2', 'y'), asst('a2', 'p2', 500)];
+    const main = jsonl(path.join(d, 'sid-1.jsonl'), [...history, ...history, ...history, prompt('p3', 'z')]);
+    const r = analyzeSession(session({ main }));
+
+    expect(r.turns.map((t) => t.promptId)).toEqual(['p1', 'p2', 'p3']);
+    expect(r.promptCount).toBe(3);
+    expect(turnOf(r, 'p1').ownCost).toBeCloseTo(dollars(1000), 12);
+    const turnSum = r.turns.reduce((n, t) => n + t.trueCost, 0);
+    expect(turnSum).toBeCloseTo(r.trueCost, 12);
   });
 
   it('dedups a message shared between a main file and an agent file', () => {
