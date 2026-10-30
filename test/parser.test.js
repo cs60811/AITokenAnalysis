@@ -101,6 +101,14 @@ describe('isRealPrompt', () => {
     }
   });
 
+  it('rejects a compact summary by its flag, whatever text it starts with', () => {
+    // 新版 Claude Code 的摘要以 <artifact-content-authored-by-others/> 開頭，躲過了上面的
+    // 開頭清單，全語料因此多出 17 個假 prompt（$40.61）。
+    const summary = '<artifact-content-authored-by-others/>\nThe summarized conversation follows.';
+    expect(isRealPrompt(userLine(summary, { isCompactSummary: true }))).toBe(false);
+    expect(isRealPrompt(userLine('any future wording', { isCompactSummary: true }))).toBe(false);
+  });
+
   it('rejects blank and whitespace-only prompts', () => {
     expect(isRealPrompt(userLine(''))).toBe(false);
     expect(isRealPrompt(userLine('   \n  '))).toBe(false);

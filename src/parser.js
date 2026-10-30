@@ -153,6 +153,10 @@ export function isRealPrompt(line) {
   if (line?.type !== 'user') return false;
   if (line.isMeta === true) return false;
   if (line.isSidechain === true) return false; // 屬於某個 agent 自己的迴圈
+  // 壓縮摘要看旗標、不看開頭：新版的摘要改以 <artifact-content-authored-by-others/> 開頭，
+  // 躲過了 NOISE_PREFIXES 裡那條 'This session is being continued…'，全語料多出
+  // 17 個假 prompt（$40.61）。
+  if (line.isCompactSummary === true) return false;
   const raw = textOf(line.message?.content);
   if (!raw) return false;
   const t = raw.trim();
